@@ -64,6 +64,12 @@ pip install -e .
 
 ---
 
+## Implementation Guidelines
+
+**MANDATORY**: Before implementing any new feature or analysis, first check whether gReLU already provides a corresponding downstream task wrapper. Refer to `downstream_tasks.md` for the full catalog. Prefer using existing APIs (e.g., `predict_variant_effects()`, `ISM_predict()`, `evolve()`, `get_attributions()`) over writing custom logic from scratch. Only implement custom code when no suitable wrapper exists.
+
+---
+
 ## AlphaGenome-PyTorch Submodule
 
 Located at `src/alphagenome_pytorch/`. See its own `CLAUDE.md` for detailed architecture, commands, and test strategy.
