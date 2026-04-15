@@ -1,6 +1,8 @@
+import datetime
 import os
 import argparse
 import math
+from dataclasses import dataclass
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
@@ -22,7 +24,7 @@ from grelu.lightning import LightningModel
 from alphagenome_pytorch.config import DtypePolicy
 from alphagenome_pytorch.metrics import pearson_r as _pearson_r
 
-# --- 全局配置 ---
+# --- Global Configuration ---
 ISM_RESULTS_DIR = "ism_results"
 os.makedirs(ISM_RESULTS_DIR, exist_ok=True)
 
@@ -81,6 +83,79 @@ def _bin_obs(obs_raw: np.ndarray, bin_size: int, n_pred_bins: int) -> np.ndarray
     return obs
 
 
+@dataclass
+class ModelConfig:
+    """Per-model constants required by every downstream task.
+
+    Adding support for a new model means defining one ``ModelConfig`` instance
+    in the corresponding ``setup_*`` method.  Task methods automatically adapt
+    through ``seq_len`` / ``bin_size`` rather than per-model ``if`` branches.
+    """
+    name: str
+    seq_len: int
+    bin_size: int
+
+    @property
+    def output_bins(self) -> int:
+        """Total output bins: seq_len // bin_size."""
+        return self.seq_len // self.bin_size
+
+
+def _write_ism_report(
+    df: pd.DataFrame,
+    model_name: str,
+    gene: str,
+    devices: str,
+    out_path: str,
+) -> None:
+    """Write an ISM summary text report from a completed ISM result dataframe.
+
+    Pure I/O function — takes the result matrix directly so it can be called
+    from ``run_ism()`` without re-reading from disk.
+
+    Args:
+        df:         ISM result matrix (rows=bases A/C/G/T, cols=positions,
+                    values=log2FC).
+        model_name: Model identifier used in the report header.
+        gene:       Gene name displayed in the report.
+        devices:    Device specification string (for provenance).
+        out_path:   Path where the .txt report will be written.
+    """
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    vals = df.values.astype(float)
+    col_max = np.max(np.abs(vals), axis=0)
+    top_n = min(10, len(df.columns))
+    top_idx = np.argsort(col_max)[::-1][:top_n]
+    with open(out_path, "w") as f:
+        f.write(f"ISM Results Report — {model_name.upper()}\n")
+        f.write("=" * 68 + "\n")
+        f.write(f"Run Time       : {ts}\n")
+        f.write(f"Gene           : {gene}\n")
+        f.write(f"GPU Devices    : {devices}\n")
+        f.write(f"Matrix Shape   : {df.shape[0]} rows × {df.shape[1]} columns"
+                f"  [4 bases × positions]\n\n")
+        f.write("── Numerical Summary ──────────────────────────────────────────────\n")
+        f.write(f"  Max log2FC   : {vals.max():+.6f}\n")
+        f.write(f"  Min log2FC   : {vals.min():+.6f}\n")
+        f.write(f"  Mean |log2FC|: {np.mean(np.abs(vals)):.6f}\n")
+        f.write(f"  Non-zero Ratio: {np.mean(vals != 0) * 100:.1f}%\n\n")
+        f.write("── Top 10 Positions by Signal Strength ──────────────────────────────────────\n")
+        f.write(f"  {'Position':>12}  {'max|log2FC|':>12}  Best Mutation Base\n")
+        for i in top_idx:
+            col = df.columns[i]
+            best = df[col].abs().idxmax()
+            f.write(f"  {col:>12}  {col_max[i]:>12.6f}  {best}\n")
+        f.write("\n── Statistics per Mutation Base ────────────────────────────────────────\n")
+        f.write(f"  {'Base':>4}  {'Max':>10}  {'Min':>10}  {'Mean':>10}  Std Dev\n")
+        for base in ["A", "C", "G", "T"]:
+            r = df.loc[base].values.astype(float)
+            f.write(f"  {base:>4}  {r.max():>+10.6f}  {r.min():>+10.6f}"
+                    f"  {r.mean():>+10.6f}  {r.std():.6f}\n")
+        f.write("\n── Full Matrix (TSV, rows=bases, cols=positions, values=log2FC) ─────\n")
+        f.write(df.to_csv(sep="\t"))
+    print(f"  Text report → {out_path}")
+
+
 class GreluTutorialApp:
     def __init__(self, gene="SRSF11", genome="hg38", devices="0,1,2,3", num_workers=1):
         self.gene = gene
@@ -95,14 +170,15 @@ class GreluTutorialApp:
 
         self.num_workers = num_workers
 
-        # 数据缓存
+        # Data cache
         self.exons = None
         self.input_seqs = None
         self.ag_seqs = None
         self.target_exons = None
+        self._model_cfg: "ModelConfig | None" = None
 
     def _cleanup(self):
-        """强制清理显存和内存引用"""
+        """Forced clearing of GPU memory and memory references"""
         print("Explicitly clearing GPU memory and garbage collecting...")
         if hasattr(self, 'borzoi'): del self.borzoi
         if hasattr(self, 'ag_rna'): del self.ag_rna
@@ -118,6 +194,7 @@ class GreluTutorialApp:
             torch.cuda.synchronize()
         print("Cleanup complete.")
 
+    # TODO: Read this
     def setup(self):
         if self.input_seqs is not None:
             return
@@ -152,30 +229,37 @@ class GreluTutorialApp:
     def setup_borzoi(self):
         print("Loading Borzoi model...")
         self.borzoi = grelu.resources.load_model(repo_id="Genentech/borzoi-model", filename="human_rep0.ckpt")
-        borzoi_input_intervals = pd.DataFrame({"chrom": [self.chrom], "start": [self.borzoi_start_coord], "end": [self.borzoi_start_coord + BORZOI_INPUT_LEN], "strand": ["+"]})
-        borzoi_out_intervals = self.borzoi.input_intervals_to_output_intervals(borzoi_input_intervals)
-        self.borzoi_out_start = int(borzoi_out_intervals.start[0])
-        self.borzoi_bin_size = BORZOI_BIN_SIZE
+        self._model_cfg = ModelConfig(name="borzoi", seq_len=BORZOI_INPUT_LEN, bin_size=BORZOI_BIN_SIZE)
 
-    def setup_ag_rna(self):
-        print("Loading AlphaGenome RNA model...")
+    def _setup_alpha_genome(self, output_key: str) -> "LightningModel":
+        """Instantiate one AlphaGenome head and update self._model_cfg.
+
+        Single source of truth for AG model construction — used by
+        ``setup_ag_rna``, ``setup_ag_cage``, and ``run_genome_wide_eval``.
+
+        Args:
+            output_key: AlphaGenome head to activate (e.g. 'rna_seq', 'cage').
+
+        Returns:
+            Configured ``LightningModel`` instance (not yet moved to GPU).
+        """
+        print(f"Loading AlphaGenome {output_key} model...")
         ag_params = dict(weights_path=WEIGHTS_PATH, dtype_policy=DtypePolicy.mixed_precision(), resolution=128)
-        self.ag_rna = LightningModel(
-            model_params={"model_type": "AlphaGenomeModel", "output_key": "rna_seq", **ag_params},
+        model = LightningModel(
+            model_params={"model_type": "AlphaGenomeModel", "output_key": output_key, **ag_params},
             train_params={"task": "regression", "loss": "mse"},
         )
-        self.ag_rna.data_params["train"] = {"seq_len": 131072, "bin_size": 128}
-        self.ag_rna.model_params["crop_len"] = 0
+        model.data_params["train"] = {"seq_len": AG_INPUT_LEN, "bin_size": AG_BIN_SIZE}
+        model.model_params["crop_len"] = 0
+        self._model_cfg = ModelConfig(name=f"alphagenome_{output_key}", seq_len=AG_INPUT_LEN, bin_size=AG_BIN_SIZE)
+        return model
+
+    # What's the difference between cage and rna seq?
+    def setup_ag_rna(self):
+        self.ag_rna = self._setup_alpha_genome("rna_seq")
 
     def setup_ag_cage(self):
-        print("Loading AlphaGenome CAGE model...")
-        ag_params = dict(weights_path=WEIGHTS_PATH, dtype_policy=DtypePolicy.mixed_precision(), resolution=128)
-        self.ag_cage = LightningModel(
-            model_params={"model_type": "AlphaGenomeModel", "output_key": "cage", **ag_params},
-            train_params={"task": "regression", "loss": "mse"},
-        )
-        self.ag_cage.data_params["train"] = {"seq_len": 131072, "bin_size": 128}
-        self.ag_cage.model_params["crop_len"] = 0
+        self.ag_cage = self._setup_alpha_genome("cage")
 
     def get_borzoi_transform(self):
         tasks_b = pd.DataFrame(self.borzoi.data_params["tasks"])
@@ -183,6 +267,7 @@ class GreluTutorialApp:
         b_off = tasks_b[(tasks_b.assay == "RNA") & tasks_b["sample"].str.contains("liver", case=False, na=False)].index.tolist()
         b_bins = self.borzoi.input_intervals_to_output_bins(self.target_exons, start_pos=self.borzoi_start_coord)
         b_pos = sorted(list(set(sum([list(range(row.start, row.end)) for row in b_bins.itertuples()], []))))
+        # Application of grelu functions
         return grelu.transforms.prediction_transforms.Specificity(
             on_tasks=b_on, off_tasks=b_off, positions=b_pos, on_aggfunc="mean", off_aggfunc="mean", length_aggfunc="mean", compare_func="divide"
         )
@@ -194,10 +279,12 @@ class GreluTutorialApp:
         ag_off = rna_meta_h[rna_meta_h.biosample_name.str.contains("liver", case=False, na=False) & (rna_meta_h.assay_title == "polyA plus RNA-seq")].track_index.tolist()
         ag_bins = model.input_intervals_to_output_bins(self.target_exons[(self.target_exons.start < self.ag_start_coord + 131072) & (self.target_exons.end > self.ag_start_coord)], start_pos=self.ag_start_coord)
         ag_pos = sorted(list(set(sum([list(range(max(0, row.start), min(1024, row.end))) for row in ag_bins.itertuples()], []))))
+        # Application of grelu functions
         return grelu.transforms.prediction_transforms.Specificity(
             on_tasks=ag_on, off_tasks=ag_off, positions=ag_pos, on_aggfunc="mean", off_aggfunc="mean", length_aggfunc="mean", compare_func="divide"
         )
 
+    # 表达谱预测
     def run_inference(self):
         self.setup()
 
@@ -209,12 +296,13 @@ class GreluTutorialApp:
         borzoi_specificity = float(b_trans.compute(borzoi_preds).ravel()[0])
 
         tasks_b = pd.DataFrame(self.borzoi.data_params["tasks"])
+        # Cap analysis gene expression
         borzoi_cage_idx = tasks_b[(tasks_b.assay == "CAGE") & tasks_b["sample"].str.contains("brain", case=False, na=False)].head(2).index.tolist()
         borzoi_rna_brain_idx = tasks_b[(tasks_b.assay == "RNA") & tasks_b["sample"].str.contains("brain", case=False, na=False)].index.tolist()
         borzoi_cage_preds = borzoi_preds[0, borzoi_cage_idx, :]
         borzoi_rna_brain_preds = borzoi_preds[0, borzoi_rna_brain_idx, :]
 
-        # 保存这些值用于绘图，然后清理模型
+        # Save these values for plotting, then clean up the model
         self.borzoi_plot_data = {
             "cage": borzoi_cage_preds, "rna": borzoi_rna_brain_preds, "spec": borzoi_specificity,
             "cage_names": (tasks_b.name[borzoi_cage_idx] + " " + tasks_b.description[borzoi_cage_idx]).tolist(),
@@ -254,9 +342,12 @@ class GreluTutorialApp:
         }
         self._cleanup()
 
-        # 4. 绘图
+        # 4. Plotting
+        self._plot_inference_comparison()
+
+    def _plot_inference_comparison(self) -> None:
+        """Render CAGE comparison and specificity chart from cached inference data."""
         print("\nGenerating Comparison Plots...")
-        # (绘图逻辑保持一致，使用刚才缓存的 data 对象)
         fig, axes = plt.subplots(2, 2, figsize=(18, 6), constrained_layout=True)
         for row in range(2):
             axes[row, 0].fill_between(range(self.borzoi_plot_data["cage"].shape[1]), self.borzoi_plot_data["cage"][row], color="steelblue", alpha=0.7)
@@ -265,7 +356,6 @@ class GreluTutorialApp:
             axes[row, 1].set_title(f"AlphaGenome — {self.ag_cage_plot_data['cage_names'][row]}", fontsize=8)
         plt.savefig("comparison_cage.png", dpi=150); plt.close()
 
-        # Specificity
         scores = {"Borzoi": self.borzoi_plot_data["spec"], "AlphaGenome": self.ag_rna_plot_data["spec"]}
         fig, ax = plt.subplots(figsize=(5, 4))
         ax.bar(list(scores.keys()), list(scores.values()), color=["steelblue", "darkorange"], edgecolor="black", width=0.5)
@@ -276,7 +366,7 @@ class GreluTutorialApp:
 
     def run_ism(self, model_name):
         self.setup()
-        self._cleanup() # 确保开始前绝对干净
+        self._cleanup() # Ensure absolutely clean before starting
 
         if model_name == "borzoi":
             self.setup_borzoi()
@@ -299,7 +389,10 @@ class GreluTutorialApp:
             devices=self.devices, num_workers=self.num_workers, batch_size=1,
             start_pos=s_pos, end_pos=e_pos, compare_func="log2FC", return_df=True
         )
-        res.to_csv(os.path.join(ISM_RESULTS_DIR, f"{model_name}_ism.csv"))
+        csv_path = os.path.join(ISM_RESULTS_DIR, f"{model_name}_ism.csv")
+        res.to_csv(csv_path)
+        txt_path = os.path.join(ISM_RESULTS_DIR, f"{model_name}_ism_report.txt")
+        _write_ism_report(res, model_name, self.gene, str(self.devices), txt_path)
         self._cleanup()
 
     # ── Genome-wide Pred-vs-Obs Pearson R ─────────────────────────────────────
@@ -375,33 +468,14 @@ class GreluTutorialApp:
             chroms = ["chr1", "chr8", "chr21"]
 
         if model_name == "borzoi":
-            print("Loading Borzoi model...")
-            self.borzoi = grelu.resources.load_model(
-                repo_id="Genentech/borzoi-model", filename="human_rep0.ckpt"
-            )
+            self.setup_borzoi()
             model_obj = self.borzoi
-            seq_len = 524_288
-            bin_size = 32
         else:
-            # Re-create the model with the requested output key so we can use
-            # a different head (cage vs rna_seq) without touching setup_ag_rna.
-            from alphagenome_pytorch.config import DtypePolicy as _DP
-            ag_params = dict(
-                weights_path=WEIGHTS_PATH,
-                dtype_policy=_DP.mixed_precision(),
-                resolution=128,
-            )
-            self.ag_rna = LightningModel(
-                model_params={"model_type": "AlphaGenomeModel",
-                              "output_key": output_key, **ag_params},
-                train_params={"task": "regression", "loss": "mse"},
-            )
-            self.ag_rna.data_params["train"] = {"seq_len": 131072, "bin_size": 128}
-            self.ag_rna.model_params["crop_len"] = 0
+            self.ag_rna = self._setup_alpha_genome(output_key)
             model_obj = self.ag_rna
-            seq_len = 131_072
-            bin_size = 128
 
+        seq_len = self._model_cfg.seq_len
+        bin_size = self._model_cfg.bin_size
         if stride is None:
             stride = seq_len
 
@@ -411,7 +485,7 @@ class GreluTutorialApp:
         if len(windows) == 0:
             raise ValueError("No windows generated — check chromosome names.")
 
-        # ── BigWigSeqDataset：序列 + 观测信号一次加载 ─────────────────────────
+        # ── BigWigSeqDataset: Sequence + observed signal loaded at once ──
         print(f"Building BigWigSeqDataset (seq={seq_len}bp, bin={bin_size}bp) …")
         bw_files = [bigwig_path] if isinstance(bigwig_path, str) else bigwig_path
         dataset = BigWigSeqDataset(
@@ -422,8 +496,8 @@ class GreluTutorialApp:
             bin_size=bin_size,
             label_aggfunc="mean",
         )
-        # dataset.labels 是 base-resolution (N, 1, seq_len)
-        # 需要手动 bin 到模型输出分辨率 (N, n_bins)，然后中心裁剪对齐预测长度
+        # dataset.labels is base-resolution (N, 1, seq_len)
+        # Need to manually bin to model output resolution (N, n_bins), then center crop to align prediction length
         obs_raw = dataset.labels[:, 0, :]  # (N, seq_len)
 
         # ── model predictions ─────────────────────────────────────────────────
@@ -439,7 +513,7 @@ class GreluTutorialApp:
 
         preds_track = preds_all[:, track_idx, :]  # (N, n_pred_bins)
 
-        # ── bin + 中心裁剪（使用模块级 _bin_obs）─────────────────────────────
+        # ── bin + center crop (using module-level _bin_obs) ──
         obs = _bin_obs(obs_raw, bin_size=bin_size, n_pred_bins=preds_track.shape[1])
 
         # ── Pearson R per window ──────────────────────────────────────────────
@@ -449,10 +523,10 @@ class GreluTutorialApp:
 
         windows_r = windows.copy()
         windows_r["pearson_r"] = per_window_r
-        windows_r["obs_mean"]  = obs.mean(axis=-1)  # 每窗口观测信号均值
+        windows_r["obs_mean"]  = obs.mean(axis=-1)  # Average observed signal per window
 
         all_valid = per_window_r[np.isfinite(per_window_r)]
-        # 只保留有信号的窗口（obs_mean > min_obs_mean）
+        # Only keep windows with signal (obs_mean > min_obs_mean)
         signal_mask = np.isfinite(per_window_r) & (windows_r["obs_mean"].values > min_obs_mean)
         signal_r    = per_window_r[signal_mask]
 
@@ -462,9 +536,9 @@ class GreluTutorialApp:
             "track_idx":  track_idx,
             "bigwig":     bigwig_path,
             "min_obs_mean_filter": min_obs_mean,
-            # 全窗口（含空白区）
+            # All windows (including blank areas)
             "all_windows":    _stats(per_window_r),
-            # 仅有信号窗口
+            # Only signal windows
             "signal_windows": _stats(signal_r),
             "n_nan": int(len(per_window_r) - len(all_valid)),
         }
@@ -482,8 +556,8 @@ class GreluTutorialApp:
         sw = summary["signal_windows"]
         print(f"\n{'='*60}")
         print(f"  Model      : {model_name}  track_idx={track_idx}")
-        print(f"  [全部窗口]  mean_r={aw['mean_r']:.4f}  median_r={aw['median_r']:.4f}  n={aw['n_windows']}")
-        print(f"  [有信号窗口 obs_mean>{min_obs_mean}]  mean_r={sw['mean_r']:.4f}  median_r={sw['median_r']:.4f}  n={sw['n_windows']}")
+        print(f"  [All Windows]  mean_r={aw['mean_r']:.4f}  median_r={aw['median_r']:.4f}  n={aw['n_windows']}")
+        print(f"  [Signal Windows obs_mean>{min_obs_mean}]  mean_r={sw['mean_r']:.4f}  median_r={sw['median_r']:.4f}  n={sw['n_windows']}")
         for chrom, st in sorted(per_chrom.items()):
             print(f"    {chrom:10s}  all mean_r={st['all']['mean_r']:.4f}  "
                   f"signal mean_r={st['signal']['mean_r']:.4f}  "
@@ -529,7 +603,7 @@ class GreluTutorialApp:
         if model_names is None:
             model_names = ["borzoi", "alphagenome"]
 
-        # ── 1. 读取 + 过滤 credible sets ────────────────────────────────────
+        # ── 1. Read + Filter credible sets ────────────────────────────────────
         print("\n[eQTL-AUPRC] Loading credible sets …")
         dfs = [pd.read_csv(f, sep="\t", compression="gzip") for f in cs_files]
         cs = pd.concat(dfs, ignore_index=True)
@@ -553,7 +627,7 @@ class GreluTutorialApp:
         cs_filtered = cs.merge(good[["gene_id", "cs_id"]], on=["gene_id", "cs_id"])
         print(f"  Variants to score     : {len(cs_filtered)}")
 
-        # ── 2. 解析变异格式 chr1_70355119_G_A → chrom/pos/ref/alt ───────────
+        # ── 2. Parse variant format chr1_70355119_G_A → chrom/pos/ref/alt ───────────
         parsed = cs_filtered["variant"].apply(_parse_variant)
         variants_df = pd.DataFrame(
             list(parsed), columns=["chrom", "pos", "ref", "alt"]
@@ -563,14 +637,14 @@ class GreluTutorialApp:
         variants_df["pip"]     = cs_filtered["pip"].values
         variants_df["causal"]  = (variants_df["pip"] >= min_pip_causal).astype(int)
 
-        # 仅保留 SNPs（ref/alt 均为单碱基）
+        # Only keep SNPs (both ref/alt are single bases)
         snp_mask = variants_df["ref"].str.len().eq(1) & variants_df["alt"].str.len().eq(1)
         variants_df = variants_df[snp_mask].reset_index(drop=True)
         print(f"  SNPs only             : {len(variants_df)} "
               f"({snp_mask.mean()*100:.1f}% of variants)")
 
-        # 过滤染色体末端附近的变异（seq_len 扩展后会越界）
-        # 用最保守值（Borzoi = 最大 receptive field）
+        # Filter variants near chromosome ends (out of bounds after seq_len extension)
+        # Use the most conservative value (Borzoi = maximum receptive field)
         chrom_sizes = grelu.io.genome.read_sizes("hg38").set_index("chrom")["size"].to_dict()
         half = BORZOI_INPUT_LEN // 2
         edge_mask = variants_df.apply(
@@ -583,10 +657,10 @@ class GreluTutorialApp:
         print(f"  After edge filter     : {len(variants_df)} "
               f"(removed {n_before - len(variants_df)} near chrom ends)")
 
-        # ── 3. 读取 track 元数据 ─────────────────────────────────────────────
+        # ── 3. Read track metadata ─────────────────────────────────────────────
         ag_meta = pd.read_parquet(AG_META_PATH)
 
-        # ── 4. 逐模型打分（每模型在独立子进程中运行，保证 CUDA context 完整释放）──
+        # ── 4. Score model by model (run each model in a separate subprocess to ensure full CUDA context release) ──
         import tempfile, subprocess as _sp
         results = {}
         for mname in model_names:
@@ -609,11 +683,12 @@ class GreluTutorialApp:
                 "--num_workers",          str(self.num_workers),
             ]
             _sp.run(cmd, check=True)
-            results[mname] = np.load(tmp_scores)
+            scores = np.load(tmp_scores)
+            results[mname] = scores[: len(variants_df)]  # trim DDP padding
             os.unlink(tmp_variants)
             os.unlink(tmp_scores)
 
-        # ── 5. 计算 per-locus AUPRC ──────────────────────────────────────────
+        # ── 5. Calculate per-locus AUPRC ──────────────────────────────────────────
         print("\n[eQTL-AUPRC] Computing per-locus AUPRC …")
         output_rows = []
         auprc_rows  = []
@@ -625,7 +700,7 @@ class GreluTutorialApp:
             row = {"gene_id": gene_id, "cs_id": cs_id,
                    "cs_size": len(grp), "n_causal": grp["causal"].sum()}
             if row["n_causal"] == 0 or row["n_causal"] == row["cs_size"]:
-                continue  # 无法计算 AUPRC（全因果或全非因果）
+                continue  # Cannot calculate AUPRC (all causal or all non-causal)
             for mname in results:
                 auprc = average_precision_score(grp["causal"], grp[f"score_{mname}"])
                 row[f"auprc_{mname}"] = auprc
@@ -634,7 +709,7 @@ class GreluTutorialApp:
         auprc_df = pd.DataFrame(auprc_rows)
         output_rows = variants_df.copy()
 
-        # ── 6. 保存结果 ──────────────────────────────────────────────────────
+        # ── 6. Save results ──────────────────────────────────────────────────────
         csv_variants = os.path.join(ISM_RESULTS_DIR, f"{output_prefix}_variants.csv")
         csv_auprc    = os.path.join(ISM_RESULTS_DIR, f"{output_prefix}_per_locus.csv")
         txt_report   = os.path.join(ISM_RESULTS_DIR, f"{output_prefix}_report.txt")
@@ -645,17 +720,17 @@ class GreluTutorialApp:
         import datetime
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(txt_report, "w") as f:
-            f.write(f"eQTL AUPRC 评估报告\n")
+            f.write(f"eQTL AUPRC Evaluation Report\n")
             f.write("=" * 68 + "\n")
-            f.write(f"运行时间    : {ts}\n")
-            f.write(f"组织        : {tissue}\n")
-            f.write(f"因果阈值    : PIP >= {min_pip_causal}\n")
-            f.write(f"位点总数    : {len(auprc_df)}\n")
-            f.write(f"变异总数    : {len(output_rows)}\n\n")
-            f.write("── 模型 AUPRC 汇总 ──────────────────────────────────────────\n")
+            f.write(f"Run Time    : {ts}\n")
+            f.write(f"Tissue      : {tissue}\n")
+            f.write(f"Causal Threshold : PIP >= {min_pip_causal}\n")
+            f.write(f"Total Loci  : {len(auprc_df)}\n")
+            f.write(f"Total Variants : {len(output_rows)}\n\n")
+            f.write("── Model AUPRC Summary ──────────────────────────────────────────\n")
             baseline = auprc_df["n_causal"].sum() / auprc_df["cs_size"].sum()
-            f.write(f"  随机基线 AUPRC          : {baseline:.4f} "
-                    f"（因果变异占比）\n")
+            f.write(f"  Random Baseline AUPRC          : {baseline:.4f} "
+                    f"(Ratio of causal variants)\n")
             for mname in results:
                 col = f"auprc_{mname}"
                 if col in auprc_df.columns:
@@ -665,19 +740,18 @@ class GreluTutorialApp:
                     f.write(f"\n  {mname.upper():15s}\n")
                     f.write(f"    mean AUPRC  : {mean_a:.4f}\n")
                     f.write(f"    median AUPRC: {med_a:.4f}\n")
-                    f.write(f"    > baseline  : {n_beats}/{len(auprc_df)} 位点 "
+                    f.write(f"    > baseline  : {n_beats}/{len(auprc_df)} loci "
                             f"({n_beats/len(auprc_df)*100:.1f}%)\n")
                     print(f"  {mname.upper():15s}  mean_AUPRC={mean_a:.4f}  "
                           f"median={med_a:.4f}  baseline={baseline:.4f}")
-            f.write(f"\n── 输出文件 ──────────────────────────────────────────────────\n")
+            f.write(f"\n── Output Files ──────────────────────────────────────────────────\n")
             f.write(f"  Per-variant scores : {csv_variants}\n")
             f.write(f"  Per-locus AUPRC    : {csv_auprc}\n")
 
-        print(f"\n  报告 → {txt_report}")
+        print(f"\n  Report → {txt_report}")
         return auprc_df
 
     def plot_ism(self):
-        # 绘图逻辑保持原样
         for m in ["borzoi", "alphagenome"]:
             p = os.path.join(ISM_RESULTS_DIR, f"{m}_ism.csv")
             if os.path.exists(p):
@@ -717,7 +791,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_output", default="eval_results.json",
                         help="JSON output path. Default: eval_results.json.")
     parser.add_argument("--eval_min_obs_mean", type=float, default=0.05,
-                        help="只统计 obs_mean 超过此阈值的有信号窗口。Default: 0.5.")
+                        help="Only statistics for signal windows exceeding this obs_mean threshold. Default: 0.05.")
     parser.add_argument("--eval_save_per_window", metavar="CSV",
                         help="Optional CSV path for per-window Pearson R table.")
     # eQTL AUPRC evaluation
@@ -738,7 +812,7 @@ if __name__ == "__main__":
                         help="Models to evaluate (default: both).")
     parser.add_argument("--eqtl_output_prefix", default="eqtl_auprc",
                         help="Output file prefix (default: eqtl_auprc).")
-    # 隐藏子命令：由 run_eqtl_auprc 在独立子进程中调用，打完一个模型就退出
+    # Hidden subcommand: called by run_eqtl_auprc in a separate subprocess, exits after scoring one model
     parser.add_argument("--_eqtl_score_one",      action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--_eqtl_score_model",    default=None,        help=argparse.SUPPRESS)
     parser.add_argument("--_eqtl_score_variants", default=None,        help=argparse.SUPPRESS)
@@ -767,53 +841,10 @@ if __name__ == "__main__":
             ]
             subprocess.run(cmd, check=True)
         else:
-            models_ran = []
             if args.compute_ism in ["borzoi", "both"]:
                 app.run_ism("borzoi")
-                models_ran.append("borzoi")
             if args.compute_ism in ["alphagenome", "both"]:
                 app.run_ism("alphagenome")
-                models_ran.append("alphagenome")
-
-            # ── 写文本报告 ───────────────────────────────────────────────────
-            import datetime
-            import numpy as np
-            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            for mname in models_ran:
-                csv_p = os.path.join(ISM_RESULTS_DIR, f"{mname}_ism.csv")
-                txt_p = os.path.join(ISM_RESULTS_DIR, f"{mname}_ism_report.txt")
-                df = pd.read_csv(csv_p, index_col=0)
-                vals = df.values.astype(float)
-                col_max = np.max(np.abs(vals), axis=0)
-                top10 = np.argsort(col_max)[::-1][:10]
-                with open(txt_p, "w") as f:
-                    f.write(f"ISM 结果报告 — {mname.upper()}\n")
-                    f.write("=" * 68 + "\n")
-                    f.write(f"运行时间       : {ts}\n")
-                    f.write(f"基因           : {args.gene}\n")
-                    f.write(f"GPU设备        : {args.devices}\n")
-                    f.write(f"矩阵形状       : {df.shape[0]} 行 × {df.shape[1]} 列"
-                            f"  [4碱基 × 位置]\n\n")
-                    f.write("── 数值摘要 ──────────────────────────────────────────────\n")
-                    f.write(f"  最大  log2FC : {vals.max():+.6f}\n")
-                    f.write(f"  最小  log2FC : {vals.min():+.6f}\n")
-                    f.write(f"  均值|log2FC| : {np.mean(np.abs(vals)):.6f}\n")
-                    f.write(f"  非零元素比例 : {np.mean(vals != 0) * 100:.1f}%\n\n")
-                    f.write("── 信号最强前10位置 ──────────────────────────────────────\n")
-                    f.write(f"  {'位置(碱基)':>12}  {'max|log2FC|':>12}  最大突变碱基\n")
-                    for i in top10:
-                        col = df.columns[i]
-                        best = df[col].abs().idxmax()
-                        f.write(f"  {col:>12}  {col_max[i]:>12.6f}  {best}\n")
-                    f.write("\n── 每突变碱基统计 ────────────────────────────────────────\n")
-                    f.write(f"  {'碱基':>4}  {'最大':>10}  {'最小':>10}  {'均值':>10}  标准差\n")
-                    for base in ["A", "C", "G", "T"]:
-                        r = df.loc[base].values.astype(float)
-                        f.write(f"  {base:>4}  {r.max():>+10.6f}  {r.min():>+10.6f}"
-                                f"  {r.mean():>+10.6f}  {r.std():.6f}\n")
-                    f.write("\n── 完整矩阵（TSV，行=碱基，列=序列位置，值=log2FC）─────\n")
-                    f.write(df.to_csv(sep="\t"))
-                print(f"  文本报告 → {txt_p}")
 
     if args.plot_ism:
         app.plot_ism()
@@ -840,7 +871,7 @@ if __name__ == "__main__":
         print(f"Summary JSON → {out_path}")
 
     if args._eqtl_score_one:
-        # ── 子进程：打完一个模型的分数就退出，CUDA context 随进程退出完全销毁 ──
+        # ── Subprocess: exit after scoring one model, CUDA context is completely destroyed as the process exits ──
         from grelu.variant import predict_variant_effects
         from grelu.transforms.prediction_transforms import Aggregate
         mname   = args._eqtl_score_model

@@ -23,8 +23,10 @@ Source Refactoring Notes
 ════════════════════════════════════════════════════════════════════════════════
 bench_ag_borzoi.py was refactored to expose:
 1. Architecture constants at module level.
-2. Pure functions (_parse_variant, _stats, _bin_obs) at module level.
-3. self.ism_center in setup() for coordinate verification.
+2. Pure functions (_parse_variant, _stats, _bin_obs, _write_ism_report) at module level.
+3. ModelConfig dataclass at module level.
+4. self.ism_center in setup() for coordinate verification.
+5. _setup_ag(output_key) as shared AG model constructor.
 """
 
 import sys
@@ -694,3 +696,117 @@ class TestLightningModelConfig:
         with patch.object(bench, "LightningModel", return_value=m):
             app.setup_ag_rna()
         assert app.ag_rna.model_params["crop_len"] == 0
+
+    def test_setup_ag_rna_sets_model_cfg(self, app_with_chrom, bench):
+        """setup_ag_rna() must populate _model_cfg with AG constants."""
+        app, _ = app_with_chrom
+        m = MagicMock()
+        m.data_params = {"train": {}}
+        m.model_params = {}
+        with patch.object(bench, "LightningModel", return_value=m):
+            app.setup_ag_rna()
+        assert app._model_cfg is not None
+        assert app._model_cfg.seq_len  == bench.AG_INPUT_LEN
+        assert app._model_cfg.bin_size == bench.AG_BIN_SIZE
+
+    def test_setup_borzoi_sets_model_cfg(self, app_with_chrom, bench):
+        """setup_borzoi() must populate _model_cfg with Borzoi constants."""
+        app, _ = app_with_chrom
+        m = MagicMock()
+        with patch.object(bench.grelu.resources, "load_model", return_value=m):
+            app.setup_borzoi()
+        assert app._model_cfg is not None
+        assert app._model_cfg.seq_len  == bench.BORZOI_INPUT_LEN
+        assert app._model_cfg.bin_size == bench.BORZOI_BIN_SIZE
+
+    def test_setup_ag_cage_sets_cage_output_key(self, app_with_chrom, bench):
+        """setup_ag_cage() must store model in ag_cage (not ag_rna)."""
+        app, _ = app_with_chrom
+        m = MagicMock()
+        m.data_params = {"train": {}}
+        m.model_params = {}
+        ctx, captured = self._capture_constructor(bench)
+        with ctx:
+            app.setup_ag_cage()
+        assert captured["model_params"]["output_key"] == "cage"
+        assert hasattr(app, "ag_cage")
+
+
+# ==============================================================================
+# [I] ModelConfig dataclass
+# ==============================================================================
+
+class TestModelConfig:
+    """ModelConfig is the single source of truth for per-model constants."""
+
+    def test_output_bins_derived_from_seq_len_and_bin_size(self, bench):
+        cfg = bench.ModelConfig(name="test", seq_len=131_072, bin_size=128)
+        assert cfg.output_bins == 1024
+
+    def test_borzoi_config_matches_module_constants(self, bench):
+        cfg = bench.ModelConfig("borzoi", bench.BORZOI_INPUT_LEN, bench.BORZOI_BIN_SIZE)
+        assert cfg.output_bins == bench.BORZOI_INPUT_LEN // bench.BORZOI_BIN_SIZE
+
+    def test_ag_config_output_bins_matches_ag_output_bins_constant(self, bench):
+        cfg = bench.ModelConfig("alphagenome_rna_seq", bench.AG_INPUT_LEN, bench.AG_BIN_SIZE)
+        assert cfg.output_bins == bench.AG_OUTPUT_BINS
+
+    def test_name_field_is_stored(self, bench):
+        cfg = bench.ModelConfig(name="my_model", seq_len=1024, bin_size=32)
+        assert cfg.name == "my_model"
+
+
+# ==============================================================================
+# [J] _write_ism_report() — pure I/O function
+# ==============================================================================
+
+class TestWriteIsmReport:
+    """_write_ism_report takes a dataframe and writes a text report — no GPU needed."""
+
+    @pytest.fixture()
+    def ism_df(self):
+        """Minimal 4×5 ISM dataframe (rows=bases, cols=positions)."""
+        rng = np.random.default_rng(0)
+        data = rng.uniform(-1, 1, (4, 5))
+        return pd.DataFrame(data, index=["A", "C", "G", "T"],
+                            columns=[str(i) for i in range(100, 105)])
+
+    def test_creates_report_file(self, bench, ism_df, tmp_path):
+        out = str(tmp_path / "report.txt")
+        bench._write_ism_report(ism_df, "borzoi", "SRSF11", "cpu", out)
+        assert Path(out).exists()
+
+    def test_report_contains_model_name_uppercase(self, bench, ism_df, tmp_path):
+        out = str(tmp_path / "r.txt")
+        bench._write_ism_report(ism_df, "alphagenome", "GENE1", "0,1", out)
+        assert "ALPHAGENOME" in Path(out).read_text()
+
+    def test_report_contains_gene_name(self, bench, ism_df, tmp_path):
+        out = str(tmp_path / "r.txt")
+        bench._write_ism_report(ism_df, "borzoi", "MYGENE", "cpu", out)
+        assert "MYGENE" in Path(out).read_text()
+
+    def test_report_contains_matrix_shape(self, bench, ism_df, tmp_path):
+        out = str(tmp_path / "r.txt")
+        bench._write_ism_report(ism_df, "borzoi", "X", "cpu", out)
+        text = Path(out).read_text()
+        # ism_df is 4 rows × 5 cols
+        assert "4" in text
+        assert "5" in text
+
+    def test_fewer_than_10_positions_does_not_crash(self, bench, tmp_path):
+        """top_n = min(10, ncols) — report must not fail with 3-column ISM."""
+        df = pd.DataFrame({"p1": [0.1, -0.2, 0.3, 0.0],
+                           "p2": [0.5,  0.1, -0.1, 0.2],
+                           "p3": [0.0,  0.4,  0.0, -0.3]},
+                          index=["A", "C", "G", "T"])
+        out = str(tmp_path / "r.txt")
+        bench._write_ism_report(df, "borzoi", "X", "cpu", out)
+        assert Path(out).exists()
+
+    def test_all_four_bases_reported(self, bench, ism_df, tmp_path):
+        out = str(tmp_path / "r.txt")
+        bench._write_ism_report(ism_df, "borzoi", "X", "cpu", out)
+        text = Path(out).read_text()
+        for base in ["A", "C", "G", "T"]:
+            assert base in text
