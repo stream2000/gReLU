@@ -198,6 +198,9 @@ def main():
                         help="Print track metadata for --output_type and exit (no inference)")
     parser.add_argument("--device", type=str, default=None,
                         help="PyTorch device (default: cuda if available, else cpu)")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Directory to save results (.npy and .bedgraph). "
+                             "Requires --ucsc or --fasta to derive genomic coordinates.")
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
@@ -302,18 +305,51 @@ def main():
     print(f"Shape       : {arr.shape}  (positions × tracks)")
     print(f"{'='*60}")
 
+    # Resolve genomic coordinates for output (needed for bedgraph)
+    win_chrom, win_start = None, None
+    if args.ucsc:
+        win_chrom, coords = args.ucsc.rsplit(":", 1)
+        win_start = int(coords.split("-")[0])
+    elif args.fasta and args.region:
+        win_chrom, coords = args.region.rsplit(":", 1)
+        win_start = int(coords.split("-")[0])
+
+    out_dir = Path(args.output_dir) if args.output_dir else None
+    if out_dir:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
     for idx in indices:
         track_arr = arr[:, idx]
-        name = "unknown"
+        name, safe_name = "unknown", f"track{idx}"
         if meta is not None and idx < len(meta):
             row = meta.iloc[idx]
             name = f"{row['biosample_name']} ({row['assay_title']})"
+            tf   = str(row.get("transcription_factor") or "").strip() or out_type
+            bs   = str(row.get("biosample_name") or "").strip().replace(" ", "_").replace("/", "-")
+            safe_name = f"{out_type}_{tf}_{bs}_track{idx}"
 
         print(f"\n  Track {idx:4d}: {name}")
         print(f"    min={track_arr.min():.4f}  max={track_arr.max():.4f}  "
               f"mean={track_arr.mean():.4f}  shape={track_arr.shape}")
 
-    print(f"\n[✓] Done. To save: `arr[:, track_index]` is a 1-D numpy array of predictions.")
+        if out_dir:
+            # .npy — raw float32 array
+            npy_path = out_dir / f"{safe_name}.npy"
+            np.save(npy_path, track_arr)
+            print(f"    saved → {npy_path}")
+
+            # .bedgraph — only if genomic coordinates are known
+            if win_chrom and win_start is not None:
+                bg_path = out_dir / f"{safe_name}.bedgraph"
+                with open(bg_path, "w") as f:
+                    f.write(f'track type=bedGraph name="{safe_name}" '
+                            f'description="AlphaGenome {out_type} {res}bp"\n')
+                    for i, val in enumerate(track_arr):
+                        start = win_start + i * res
+                        f.write(f"{win_chrom}\t{start}\t{start + res}\t{val:.4f}\n")
+                print(f"    saved → {bg_path}")
+
+    print(f"\n[✓] Done.")
 
 
 if __name__ == "__main__":
