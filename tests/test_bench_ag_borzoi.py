@@ -147,7 +147,7 @@ def _install_alphagenome_stub():
 
 @pytest.fixture(scope="module")
 def bench():
-    """Import bench_ag_borzoi with heavy deps stubbed out. Returns the module."""
+    """Import modules with heavy deps stubbed out. Returns a container for them."""
     grelu = _build_grelu_stub()
     _install_stub(grelu)
     _install_alphagenome_stub()
@@ -155,10 +155,28 @@ def bench():
     import matplotlib
     matplotlib.use("Agg")
 
-    sys.modules.pop("bench_ag_borzoi", None)
-    mod = importlib.import_module("bench_ag_borzoi")
-    mod.grelu = grelu   # expose so tests can patch sub-attributes
-    return mod
+    # Clear previous imports to ensure stubbing works
+    for m in ["bench_ag_borzoi", "scripts.smoke_tests.config", "scripts.smoke_tests.setup", "scripts.smoke_tests.utils"]:
+        sys.modules.pop(m, None)
+
+    import bench_ag_borzoi as config_mod
+    import scripts.smoke_tests.setup as setup_mod
+    import scripts.smoke_tests.utils as utils_mod
+
+    # Patch modules so they use our grelu stub
+    setup_mod.grelu = grelu
+
+    # Create a unified namespace for the tests to use (simulating the old bench_ag_borzoi)
+    class BenchNamespace:
+        def __init__(self, c, s, u):
+            self.__dict__.update(c.__dict__)
+            self.__dict__.update(s.__dict__)
+            self.__dict__.update(u.__dict__)
+            self.grelu = grelu
+            self.setup_mod = s
+            self.utils_mod = u
+
+    return BenchNamespace(config_mod, setup_mod, utils_mod)
 
 
 @pytest.fixture()
@@ -640,18 +658,18 @@ class TestLightningModelConfig:
         a.chrom = "chr1"
         return a, bench
 
-    def _capture_constructor(self, bench_mod):
-        """Capture calls to LightningModel constructor within bench_ag_borzoi namespace."""
+    def _capture_constructor(self, bench_obj):
+        """Capture calls to LightningModel constructor within setup_mod namespace."""
         captured = {}
 
         def _ctor(**kwargs):
             captured.update(kwargs)
             m = MagicMock()
-            m.data_params = {"train": {}}
-            m.model_params = {}
+            m.data_params = {"train": {"seq_len": 0, "bin_size": 0}}
+            m.model_params = {"crop_len": -1}
             return m
 
-        ctx = patch.object(bench_mod, "LightningModel", side_effect=_ctor)
+        ctx = patch.object(bench_obj.setup_mod, "LightningModel", side_effect=_ctor)
         return ctx, captured
 
     def test_rna_output_key_is_rna_seq(self, app_with_chrom, bench):
@@ -680,9 +698,9 @@ class TestLightningModelConfig:
     def test_seq_len_is_ag_input_len(self, app_with_chrom, bench):
         app, _ = app_with_chrom
         m = MagicMock()
-        m.data_params = {"train": {}}
-        m.model_params = {}
-        with patch.object(bench, "LightningModel", return_value=m):
+        m.data_params = {"train": {"seq_len": 0, "bin_size": 0}}
+        m.model_params = {"crop_len": -1}
+        with patch.object(bench.setup_mod, "LightningModel", return_value=m):
             app.setup_ag_rna()
         assert app.ag_rna.data_params["train"]["seq_len"]  == bench.AG_INPUT_LEN
         assert app.ag_rna.data_params["train"]["bin_size"] == bench.AG_BIN_SIZE
@@ -691,9 +709,9 @@ class TestLightningModelConfig:
         """AlphaGenome does not crop; crop_len must be 0."""
         app, _ = app_with_chrom
         m = MagicMock()
-        m.data_params = {"train": {}}
-        m.model_params = {}
-        with patch.object(bench, "LightningModel", return_value=m):
+        m.data_params = {"train": {"seq_len": 0, "bin_size": 0}}
+        m.model_params = {"crop_len": -1}
+        with patch.object(bench.setup_mod, "LightningModel", return_value=m):
             app.setup_ag_rna()
         assert app.ag_rna.model_params["crop_len"] == 0
 
@@ -701,9 +719,9 @@ class TestLightningModelConfig:
         """setup_ag_rna() must populate _model_cfg with AG constants."""
         app, _ = app_with_chrom
         m = MagicMock()
-        m.data_params = {"train": {}}
-        m.model_params = {}
-        with patch.object(bench, "LightningModel", return_value=m):
+        m.data_params = {"train": {"seq_len": 0, "bin_size": 0}}
+        m.model_params = {"crop_len": -1}
+        with patch.object(bench.setup_mod, "LightningModel", return_value=m):
             app.setup_ag_rna()
         assert app._model_cfg is not None
         assert app._model_cfg.seq_len  == bench.AG_INPUT_LEN
@@ -723,8 +741,8 @@ class TestLightningModelConfig:
         """setup_ag_cage() must store model in ag_cage (not ag_rna)."""
         app, _ = app_with_chrom
         m = MagicMock()
-        m.data_params = {"train": {}}
-        m.model_params = {}
+        m.data_params = {"train": {"seq_len": 0, "bin_size": 0}}
+        m.model_params = {"crop_len": -1}
         ctx, captured = self._capture_constructor(bench)
         with ctx:
             app.setup_ag_cage()

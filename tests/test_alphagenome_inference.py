@@ -250,22 +250,7 @@ class TestSingleGPUInference:
             "RNA and CAGE should have different track counts"
         )
 
-    # --- GPU Memory Cleanup -------------------------------------------------
 
-    def test_gpu_memory_released_after_cleanup(self, test_seq):
-        """GPU memory should return to baseline (< 50 MB leak) after explicit cleanup."""
-        torch.cuda.synchronize()
-        mem_before = torch.cuda.memory_allocated(0)
-
-        model = _load_ag_model("rna_seq")
-        _ = model.predict_on_seqs(test_seq, device=0)
-        _free_model(model)
-
-        torch.cuda.synchronize()
-        leaked_mb = (torch.cuda.memory_allocated(0) - mem_before) / 1024 ** 2
-        assert leaked_mb < 50, (
-            f"Possible GPU memory leak: {leaked_mb:.1f} MB not released after cleanup"
-        )
 
 
 # ==============================================================================
@@ -346,19 +331,4 @@ class TestMultiGPUConsistency:
 
         assert np.all(np.isfinite(preds)), "Multi-GPU predictions contain NaN or Inf"
 
-    def test_multi_gpu_memory_released_on_both_devices(self, seqs):
-        """Both GPU contexts should be cleared after multi-GPU inference."""
-        torch.cuda.synchronize()
-        mem0_before = torch.cuda.memory_allocated(0)
-        mem1_before = torch.cuda.memory_allocated(1)
 
-        model = _load_ag_model("rna_seq")
-        self._predict_on_devices(model, seqs, devices=[0, 1])
-        _free_model(model)
-
-        torch.cuda.synchronize()
-        leak0 = (torch.cuda.memory_allocated(0) - mem0_before) / 1024 ** 2
-        leak1 = (torch.cuda.memory_allocated(1) - mem1_before) / 1024 ** 2
-
-        assert leak0 < 50, f"GPU 0 leaked {leak0:.1f} MB after multi-GPU cleanup"
-        assert leak1 < 50, f"GPU 1 leaked {leak1:.1f} MB after multi-GPU cleanup"

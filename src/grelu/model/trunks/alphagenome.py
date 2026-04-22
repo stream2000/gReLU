@@ -4,6 +4,17 @@ import torch.nn as nn
 from alphagenome_pytorch.model import AlphaGenome
 from alphagenome_pytorch.config import DtypePolicy
 
+
+'''
+# TODO 
+
+1. Cropping
+2. Trunk or Model; Seems like we contains all the heads here
+3. Parameter limits: We can output multiple trunks/resolution/organism at the same time, while 
+   current design limits it. 
+'''
+
+
 class AlphaGenomeTrunk(nn.Module):
     """
     A trunk that wraps the AlphaGenome model from alphagenome-pytorch.
