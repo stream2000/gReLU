@@ -167,7 +167,7 @@ class AGL2Transform(nn.Module):
 
 
 # ── VCF loading ───────────────────────────────────────────────────────────────
-
+# VCF file is like the standard format for SNPs.
 def load_vcf(path: str | Path) -> pd.DataFrame:
     """Load a minimal VCF into a DataFrame with chrom/pos/ref/alt columns."""
     rows = []
@@ -186,7 +186,7 @@ def load_vcf(path: str | Path) -> pd.DataFrame:
 
 
 # ── AUROC helpers ─────────────────────────────────────────────────────────────
-
+# like not only calculate
 def bootstrap_auroc(scores: np.ndarray, labels: np.ndarray,
                     n: int = 1000, seed: int = 42) -> tuple[float, float]:
     """Compute 95% confidence interval for AUROC using bootstrap resampling.
@@ -215,7 +215,6 @@ def bootstrap_auroc(scores: np.ndarray, labels: np.ndarray,
 
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
-
 def score_variants(vdf: pd.DataFrame, model, transform: nn.Module,
                    devices: list[int], batch_size: int, num_workers: int,
                    seq_len: int, score_mode: str = "l2") -> np.ndarray:
@@ -264,15 +263,15 @@ def score_variants(vdf: pd.DataFrame, model, transform: nn.Module,
 
 
 # ── Per-tissue evaluation ────────────────────────────────────────────────────
-
+# Core method
 def evaluate_tissue(tissue: str, pos_vcf: str, neg_vcf: str,
                     model, transform: nn.Module, seq_len: int,
                     devices: list[int], batch_size: int, num_workers: int,
                     score_mode: str = "l2") -> dict:
     """Full evaluation pipeline for a single GTEx tissue.
 
-    1. Load eQTL (pos) and Negative (neg) VCFs.
-    2. Filter variants that are too close to chromosome ends for the model's window.
+    1. Load eQTL (pos) and Negative (neg) VCFs. -> the ground truth.
+    2. Filter variants that are too close to chromosome ends for the model's window. -> Filter out edge cases.
     3. Run model inference to get scores.
     4. Compute AUROC and 95% bootstrap CI.
     """
