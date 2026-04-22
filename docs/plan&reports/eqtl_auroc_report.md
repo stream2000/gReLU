@@ -52,9 +52,10 @@ gs://borzoi-paper/qtl/eqtl/*.vcf.gz  (requester-pays bucket)
 
 | 模型 | Score 模式 | Variants (pos/neg) | AUROC | 95% CI | 运行时间 |
 |------|------------|---------------------|-------|--------|---------|
-| **AlphaGenome** (rna_seq, 768 tracks, 128bp, fold_0) | `--score sum`（旧） | 647 / 650 | **0.7410** | [0.714, 0.766] | ~3.5 min |
-| **Borzoi** rep0 (all 7611 tracks, 32bp) | `--score sum`（旧） | 640 / 642 | **0.7053** | [0.678, 0.734] | ~2 min |
-| **Borzoi** rep0 (all 7611 tracks, 32bp) | **`--score l2`（新默认）** | 640 / 642 | **0.7485** | [0.722, 0.775] | ~2 min |
+| **AlphaGenome** (rna_seq, 768 tracks, 128bp, fold_0) | `--score sum`（旧） | 647 / 650 | 0.7410 | [0.714, 0.766] | ~3.5 min |
+| **Borzoi** rep0 (all 7611 tracks, 32bp) | `--score sum`（旧） | 640 / 642 | 0.7053 | [0.678, 0.734] | ~2 min |
+| **AlphaGenome** (rna_seq, 768 tracks, 128bp, fold_0) | **`--score l2`（新）** | 647 / 650 | **0.7435** | [0.718, 0.768] | ~3.5 min |
+| **Borzoi** rep0 (all 7611 tracks, 32bp) | **`--score l2`（新）** | 640 / 642 | **0.7485** | [0.722, 0.775] | ~2 min |
 | 论文 Borzoi 4-rep ensemble + RF | — | — | **0.7943** | — | — |
 
 > 注：paper VCF 中有少量 variants 超出 Borzoi 524kb 窗口边界（20 个），AlphaGenome 131kb 窗口边界（5 个），
@@ -71,23 +72,29 @@ gs://borzoi-paper/qtl/eqtl/*.vcf.gz  (requester-pays bucket)
 | RC 平均 | ✅ 正向 + RC 均值 | ❌ 未实现 | ~1–2% AUROC |
 | Replicate ensemble | ✅ f0–f3 四个 rep 均值 | ❌ 单 rep（Borzoi rep0 / AG fold_0）| ~2–3% AUROC |
 
-**L2 评分改善**：0.7485 − 0.7053 = **+0.043**，通过消除跨 track 符号相消实现。
+**L2 评分改善**：
+- Borzoi：0.7485 − 0.7053 = **+0.043**（消除跨 track 符号相消后效果显著）
+- AlphaGenome：0.7435 − 0.7410 = **+0.003**（改善较小；AG 768 tracks 方向较一致，sum 已近似 L1）
 
-**与论文 ensemble 差距**：0.7943 − 0.7485 = **0.046**，其中：
-- RC + ensemble 约可弥补 3–5%（约达 0.77–0.80）
-- 剩余差距来自零样本 vs. RF 监督分类器（~3–5%）
-- 论文 Fig.5b 显示 brain_cortex 各组织 AUROC 在 0.72–0.84 之间
+**与论文 ensemble 差距**：0.7943 − 0.7485 = **0.046**，来自 RC + 4-rep ensemble（~3–5%）和零样本 vs. RF（~3–5%）。
 
 ---
 
 ## AlphaGenome vs Borzoi 比较
 
-在完全相同的评估条件下（paper VCF，4-GPU，single rep，brain_cortex）：
+### `--score sum`（旧，存在跨 track 相消问题）
 
-- **AlphaGenome 0.7410 > Borzoi 0.7053（+0.036，CI 基本不重叠）**
-- AlphaGenome 仅使用 768 个 RNA-seq tracks（vs Borzoi 7,611 tracks）
-- AlphaGenome 输入窗口 131kb vs Borzoi 524kb（前者更小，但 AUROC 更高）
-- AlphaGenome 单模型已接近论文 Borzoi 4-rep ensemble（差距仅 0.053）
+- AlphaGenome 0.7410 > Borzoi 0.7053（**+0.036**，CI 基本不重叠）
+- 差距大部分来自 Borzoi 的 7611 tracks 中正负方向相消严重
+
+### `--score l2`（新默认，消除相消）
+
+- AlphaGenome 0.7435 vs Borzoi 0.7485（**差距 0.005，CI 完全重叠**）
+- **两模型在 brain_cortex 基本持平**
+- AlphaGenome：131kb 窗口 + 768 RNA-seq tracks
+- Borzoi：524kb 窗口 + 7611 全模态 tracks
+
+**解读**：旧版中 AG 的优势主要来自 Borzoi SUM score 的设计缺陷（跨组织 tracks 方向相消）。修复后两模型真实能力相近，但 Borzoi 略高（+0.005）。需要全 49 组织才能得出可靠结论。
 
 ---
 
@@ -125,8 +132,8 @@ python -m scripts.run_eqtl_auroc --model alphagenome --devices 0,1,2,3 --output 
 
 ## 下一步
 
-1. **[高优先]** 用 `--score l2` 跑 AlphaGenome brain_cortex 验证，确认 AG 仍优于 Borzoi
-2. **[高优先]** 全 49 组织跑完 Borzoi + AlphaGenome（`--score l2`），报告 mean ± SD
+1. ~~**[高优先]** 用 `--score l2` 跑 AlphaGenome brain_cortex 验证~~ ✅ 完成（AG 0.7435，与 Borzoi 0.7485 基本持平）
+2. **[最高优先]** 全 49 组织跑完 Borzoi + AlphaGenome（`--score l2`），报告 mean ± SD
 3. **[对齐论文]** 加 RC 平均（`rc=True`，运行时间翻倍，预计 +1–2% AUROC）
 4. **[对齐论文]** Borzoi 加载 f0–f3 四个 rep ensemble
 5. **[分析]** 各组织 AUROC 分布，找 AlphaGenome vs Borzoi 的组织特异性差异
