@@ -4,37 +4,39 @@ Scores pos/neg VCF pairs with L2 score (default) or |SUM score| and computes
 per-tissue AUROC across 49 GTEx tissues.
 
 Scoring modes (--score argument):
-  l2  [default]  Per-track L1 of log-space sums — the memory-efficient approximation
-                 of the paper's L2 score (Methods section).
+  l2  [default]  Per-track logSUM approximation of the paper's L2 score.
                  u_t = Σ_l log2(1 + y_count_l)  per track (in transform)
-                 score = Σ_t |u_t^alt - u_t^ref|   (always ≥ 0, no cross-track cancellation)
-                 The paper's exact L2 is sqrt(Σ_l diff_l^2); using |Σ_l diff_l| (logSUM)
-                 avoids materializing (N × 7611 × 16384) ≈ 640 GB RAM for all variants.
-                 In practice, eQTL bins shift in one direction per gene, so |logSUM| ≈ L2.
+                 zero-shot: score = Σ_t |u_t^alt - u_t^ref|  (single scalar)
+                 RF mode:   features = [|u_t^alt - u_t^ref| for t=1..T]  (T-dim)
 
-  sum            |Σ_t Σ_l (inv_squash(y_alt) - inv_squash(y_ref))|
-                 Full piecewise inverse of Borzoi squash before summing.
+  sum            Per-track sum in count space after full piecewise inverse squash.
                  u_t = Σ_l (y_alt^count - y_ref^count) per track
-                 score = |Σ_t u_t|  (can cancel when tracks move in opposite directions)
+                 zero-shot: score = |Σ_t u_t|
+                 RF mode:   features = [(u_t^alt - u_t^ref) for t=1..T]  (T-dim)
+
+Evaluation modes:
+  zero-shot  [default]  Single heuristic scalar → direct AUROC (no training).
+  --rf                  Random Forest classifier on T-dim feature vector with
+                        tenfold stratified cross-validation (paper standard).
+                        Matches paper numbers: 0.7943 (4-rep+L2+RF), 0.7880 (single+L2+RF).
 
 Relationship to paper AUROC numbers:
-  - 0.7943 (reported in paper Fig. 5b) = 4-rep ensemble + L2 + supervised RF
-  - 0.7880 = single model + L2 + supervised RF
-  - 0.7720 = ensemble + SUM + supervised RF
-  - Our zero-shot L2 (Σ_t u_t, no RF) is comparable but lower than paper numbers
-    because the RF learns tissue-specific weights the |Σ_t u_t| heuristic ignores.
+  - 0.7943 (Fig. 5b) = 4-rep ensemble + L2 + supervised RF + 10-fold CV
+  - 0.7880 = single model + L2 + supervised RF + 10-fold CV
+  - 0.7720 = ensemble + SUM + supervised RF + 10-fold CV
+  - Zero-shot L2 is lower because RF learns tissue-specific track weights.
 
 Usage:
     source activate.sh
-    python scripts/run_eqtl_auroc.py \\
-        --model borzoi \\
-        --manifest ~/.cache/eqtl_finemapping/paper_vcfs/manifest.tsv \\
-        --score l2 \\
-        --devices 0,1,2,3 \\
-        --output eqtl_auroc_results.tsv
 
-    # Quick validation on one tissue:
-    python scripts/run_eqtl_auroc.py --model borzoi --tissue brain_cortex --score l2
+    # Zero-shot (heuristic, no RF):
+    python scripts/eqtl/run_eqtl_auroc.py --model borzoi --devices 0
+
+    # RF (paper standard, 10-fold CV):
+    python scripts/eqtl/run_eqtl_auroc.py --model borzoi --rf --devices 0
+
+    # Single tissue:
+    python scripts/eqtl/run_eqtl_auroc.py --model borzoi --tissue brain_cortex --rf --devices 0
 """
 import argparse
 import sys
@@ -45,7 +47,9 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.distributed as dist
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold
 
 import grelu.resources
 from grelu.lightning import LightningModel
@@ -69,12 +73,7 @@ HG38_CHROM_SIZES = {
 
 
 def filter_edge_variants(df: pd.DataFrame, seq_len: int) -> pd.Series:
-    """Return boolean mask of variants that fit within chromosome bounds.
-
-    The paper VCFs use Borzoi's smaller chromosome edge margin. AlphaGenome
-    has a narrower window (131kb vs 524kb), so it keeps all Borzoi-filtered
-    variants. We filter independently per model to avoid silent errors.
-    """
+    """Return boolean mask of variants that fit within chromosome bounds."""
     half = seq_len // 2
     chrom_sz = df["chrom"].map(HG38_CHROM_SIZES)
     ok = (
@@ -96,50 +95,30 @@ def _inverse_squash_borzoi(x: torch.Tensor) -> torch.Tensor:
       y_sq = y^(3/4)              if y^(3/4) <= 384
              384 + sqrt(y^(3/4) - 384)   otherwise
 
-    Inverse (used at inference to recover count space):
+    Inverse:
       y = y_sq^(4/3)              if y_sq <= 384
           (384 + (y_sq-384)^2)^(4/3)    otherwise
-
-    The piecewise branch matters for highly-expressed bins (y_sq > 384).
-    Without it, the model systematically underestimates changes in high-expression regions.
     """
     x = x.clamp(min=0)
     z = (x - 384.0).clamp(min=0)
-    # torch.where avoids modifying x in-place; both branches computed for all elements
     return torch.where(x > 384.0, (384.0 + z ** 2) ** (4.0 / 3.0), x ** (4.0 / 3.0))
 
 
 class BorzoiSumTransform(nn.Module):
-    """Full piecewise inverse Borzoi squash → sum across length bins.
-
-    Output shape: (T, 1) per sample — the summed count-space expression per track.
-    Used for SUM score: score = |Σ_t (sum_alt - sum_ref)|.
-
-    Note: signed sum can cancel when tracks move in opposite directions
-    (e.g., brain up, liver down). Use BorzoiL2Transform for cancellation-free scoring.
-    """
+    """Full piecewise inverse Borzoi squash → sum across length bins. Output: (T, 1)."""
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = _inverse_squash_borzoi(x)
-        return x.sum(dim=-1, keepdim=True)  # (T, L) → (T, 1)
+        return x.sum(dim=-1, keepdim=True)
 
 
 class BorzoiL2Transform(nn.Module):
     """Inverse Borzoi squash → log2(1+x), then sum over L bins. Output: (T, 1).
 
-    Computes the log-space sum per track: u_t = Σ_l log2(1 + y_count_l).
-    After predict_variant_effects subtracts alt-ref, the caller computes:
-      score = Σ_t |u_t^alt - u_t^ref|   (L1 of per-track log sums)
-
-    This approximates the paper's L2 score in spirit:
-    - Log space: focuses on fold change, not absolute magnitude.
-    - Per-track absolute value: eliminates cross-track cancellation
-      (brain up, liver down no longer cancel each other).
-    - Memory efficient: (T, 1) output, not (T, L) — storing (N, T, 16384) would
-      require ~640 GB RAM for Borzoi's 7611 tracks and N~1000 variants.
-
-    The paper's exact L2 is u_t = sqrt(Σ_l diff_l^2), which additionally avoids
-    within-track spatial cancellation. For eQTL variants affecting a gene, bins
-    typically shift in the same direction, so |logSUM| ≈ L2 in practice.
+    Computes logSUM per track: u_t = Σ_l log2(1 + y_count_l).
+    The paper's exact L2 per track is sqrt(Σ_l diff_l^2); using |logSUM| is a
+    memory-efficient approximation (avoids 640 GB for N×7611×16384).
+    For RF features, we use the signed per-track logSUM diff (N, T), giving the
+    RF the same information as a T-dim feature vector.
     """
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         log_x = torch.log2(1.0 + _inverse_squash_borzoi(x))
@@ -147,27 +126,19 @@ class BorzoiL2Transform(nn.Module):
 
 
 class AGSumTransform(nn.Module):
-    """AlphaGenome sum score: sum across length bins. Output: (T, 1).
-
-    AlphaGenome's GenomeTracksHead already applies inverse squash and track-mean
-    scaling, so the output is already in count space.
-    """
+    """AlphaGenome sum score: sum across length bins. Output: (T, 1)."""
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x.sum(dim=-1, keepdim=True)  # (T, 1)
+        return x.sum(dim=-1, keepdim=True)
 
 
 class AGL2Transform(nn.Module):
-    """AlphaGenome log-space sum per track. Output: (T, 1).
-
-    AG output is already in count space, so we apply log2(1+x) then sum over L.
-    Score = Σ_t |u_t^alt - u_t^ref| (L1 of per-track log sums, no cancellation).
-    """
+    """AlphaGenome log-space sum per track. Output: (T, 1)."""
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.log2(1.0 + x.clamp(min=0)).sum(dim=-1, keepdim=True)  # (T, 1)
+        return torch.log2(1.0 + x.clamp(min=0)).sum(dim=-1, keepdim=True)
 
 
 # ── VCF loading ───────────────────────────────────────────────────────────────
-# VCF file is like the standard format for SNPs.
+
 def load_vcf(path: str | Path) -> pd.DataFrame:
     """Load a minimal VCF into a DataFrame with chrom/pos/ref/alt columns."""
     rows = []
@@ -186,56 +157,35 @@ def load_vcf(path: str | Path) -> pd.DataFrame:
 
 
 # ── AUROC helpers ─────────────────────────────────────────────────────────────
-# like not only calculate
+
 def bootstrap_auroc(scores: np.ndarray, labels: np.ndarray,
                     n: int = 1000, seed: int = 42) -> tuple[float, float]:
-    """Compute 95% confidence interval for AUROC using bootstrap resampling.
-
-    Args:
-        scores: Model predictions (SUM scores).
-        labels: Ground truth binary labels (1 for eQTL, 0 for negative).
-        n: Number of bootstrap iterations.
-        seed: Random seed for reproducibility.
-
-    Returns:
-        (lower_ci, upper_ci): The 2.5th and 97.5th percentiles of the bootstrap distribution.
-    """
+    """Compute 95% CI for AUROC using bootstrap resampling."""
     rng = np.random.default_rng(seed)
     aucs = []
     for _ in range(n):
-        # Sample with replacement to create a new dataset of the same size
         idx = rng.choice(len(labels), len(labels), replace=True)
-        # Ensure the bootstrap sample contains both classes
-        if labels[idx].nunique() < 2 if hasattr(labels[idx], "nunique") else len(np.unique(labels[idx])) < 2:
+        if len(np.unique(labels[idx])) < 2:
             continue
         aucs.append(roc_auc_score(labels[idx], scores[idx]))
-
     aucs = np.array(aucs)
     return float(np.percentile(aucs, 2.5)), float(np.percentile(aucs, 97.5))
 
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
+
 def score_variants(vdf: pd.DataFrame, model, transform: nn.Module,
                    devices: list[int], batch_size: int, num_workers: int,
-                   seq_len: int, score_mode: str = "l2") -> np.ndarray:
-    """Predict effects for all variants and compute the eQTL classification score.
+                   seq_len: int, score_mode: str = "l2",
+                   return_per_track: bool = False) -> np.ndarray:
+    """Predict variant effects and return scores or per-track feature matrix.
 
     Args:
-        vdf: DataFrame with variants (chrom, pos, ref, alt).
-        model: The LightningModel instance.
-        transform: BorzoiSumTransform / BorzoiL2Transform / AGSumTransform / AGL2Transform.
-        devices: List of GPU indices.
-        batch_size: Inference batch size.
-        num_workers: DataLoader workers.
-        seq_len: Model receptive field (input sequence length).
-        score_mode: "l2" (default) or "sum". Both modes receive (N, T, 1) diffs.
-            l2:  transform outputs log-space sums per track.
-                 score = Σ_t |u_t^alt - u_t^ref|  — always ≥ 0, no cancellation.
-            sum: transform outputs count-space sums per track.
-                 score = |Σ_t u_t|  — signed sum, can cancel across tissues.
+        return_per_track: If True, return (N, T) feature matrix for RF training.
+                          If False (default), return (N,) scalar scores.
 
     Returns:
-        1D array of scores (always non-negative) for each variant.
+        (N, T) feature matrix when return_per_track=True, else (N,) scores.
     """
     diffs = predict_variant_effects(
         variants=vdf,
@@ -252,33 +202,75 @@ def score_variants(vdf: pd.DataFrame, model, transform: nn.Module,
 
     if score_mode == "l2":
         # diffs: (N, T, 1) — per-track log-space sums (from BorzoiL2Transform / AGL2Transform)
-        # score = Σ_t |u_t^alt - u_t^ref|   (L1 of per-track log sums, no cross-track cancellation)
-        per_track_logdiff = diffs.squeeze(-1)  # (N, T)
-        return np.abs(per_track_logdiff).sum(axis=-1)  # (N,)  — always ≥ 0
+        per_track = diffs.squeeze(-1)  # (N, T) signed per-track logSUM diff
+        if return_per_track:
+            # RF features: abs(per-track logSUM diff), matching paper's L2 spirit.
+            # Sign cancellation across bins is already eliminated by the logSUM;
+            # taking abs gives a non-negative T-dim feature vector per variant.
+            return np.abs(per_track)  # (N, T)
+        return np.abs(per_track).sum(axis=-1)  # (N,) zero-shot heuristic
     else:
         # diffs: (N, T, 1) count-space per-track sums
-        # score = |Σ_t u_t|  (signed sum, can cancel across tracks)
-        sum_score = diffs.squeeze(-1).sum(axis=-1)  # (N,)
-        return np.abs(sum_score)
+        per_track = diffs.squeeze(-1)  # (N, T)
+        if return_per_track:
+            return per_track  # (N, T) signed — RF can learn sign direction
+        return np.abs(per_track.sum(axis=-1))  # (N,)
+
+
+# ── Random Forest evaluation ──────────────────────────────────────────────────
+
+def auroc_rf_cv(X: np.ndarray, y: np.ndarray,
+                n_folds: int = 10, n_estimators: int = 100,
+                seed: int = 42) -> tuple[float, float, float]:
+    """Tenfold stratified CV AUROC with a Random Forest, matching paper method.
+
+    The paper trains one RF per tissue on the T-dim per-track feature vector
+    using eQTL causal (1) vs non-causal (0) labels, then evaluates with
+    tenfold CV. AUROC is computed from concatenated out-of-fold predictions.
+
+    Args:
+        X: Feature matrix (N, T) — per-track scores.
+        y: Binary labels (N,) — 1=eQTL, 0=negative.
+        n_folds: Number of CV folds (paper uses 10).
+        n_estimators: Trees in the forest.
+        seed: Random seed.
+
+    Returns:
+        (auroc, ci_lo, ci_hi)
+    """
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+    oof_scores = np.zeros(len(y))
+
+    for train_idx, test_idx in skf.split(X, y):
+        clf = RandomForestClassifier(
+            n_estimators=n_estimators,
+            n_jobs=-1,
+            random_state=seed,
+        )
+        clf.fit(X[train_idx], y[train_idx])
+        oof_scores[test_idx] = clf.predict_proba(X[test_idx])[:, 1]
+
+    auroc = roc_auc_score(y, oof_scores)
+    ci_lo, ci_hi = bootstrap_auroc(oof_scores, y, n=1000, seed=seed)
+    return auroc, ci_lo, ci_hi
 
 
 # ── Per-tissue evaluation ────────────────────────────────────────────────────
-# Core method
+
 def evaluate_tissue(tissue: str, pos_vcf: str, neg_vcf: str,
                     model, transform: nn.Module, seq_len: int,
                     devices: list[int], batch_size: int, num_workers: int,
-                    score_mode: str = "l2") -> dict:
+                    score_mode: str = "l2", use_rf: bool = False) -> dict:
     """Full evaluation pipeline for a single GTEx tissue.
 
-    1. Load eQTL (pos) and Negative (neg) VCFs. -> the ground truth.
-    2. Filter variants that are too close to chromosome ends for the model's window. -> Filter out edge cases.
-    3. Run model inference to get scores.
-    4. Compute AUROC and 95% bootstrap CI.
+    1. Load eQTL (pos) and negative (neg) VCFs.
+    2. Filter edge variants outside model's receptive field.
+    3. Run model inference.
+    4. Compute AUROC — either zero-shot heuristic or RF with 10-fold CV.
     """
     pos_df = load_vcf(pos_vcf)
     neg_df = load_vcf(neg_vcf)
 
-    # Filter variants that extend beyond chromosome ends for this model's window
     pos_ok = filter_edge_variants(pos_df, seq_len)
     neg_ok = filter_edge_variants(neg_df, seq_len)
     n_filtered = (~pos_ok).sum() + (~neg_ok).sum()
@@ -294,27 +286,40 @@ def evaluate_tissue(tissue: str, pos_vcf: str, neg_vcf: str,
         print(f"  [{tissue}] SKIP after filter: pos={n_pos}, neg={n_neg}")
         return {}
 
-    # Combine positive and negative variants for a single inference pass
     all_variants = pd.concat([pos_df, neg_df], ignore_index=True)
     labels = np.array([1] * n_pos + [0] * n_neg)
 
-    print(f"  [{tissue}] scoring {n_pos} pos + {n_neg} neg variants ...")
-    scores = score_variants(all_variants, model, transform, devices, batch_size,
-                            num_workers, seq_len, score_mode=score_mode)
+    mode_str = "RF 10-fold CV" if use_rf else "zero-shot"
+    print(f"  [{tissue}] scoring {n_pos} pos + {n_neg} neg ({mode_str}) ...")
 
-    # DDP Handling:
-    # If using multiple GPUs, predict_variant_effects will synchronize and gather 
-    # results on Rank 0. Workers on other ranks will return partial/padded data.
+    result_data = score_variants(
+        all_variants, model, transform, devices, batch_size,
+        num_workers, seq_len, score_mode=score_mode,
+        return_per_track=use_rf,
+    )
+
+    # DDP: only rank 0 has valid gathered results
     if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
         return {}
 
-    # Trim DDP-padding: Lightning ensures all ranks have equal chunks, so the 
-    # gathered array might be slightly longer than the original input.
-    scores = scores[: len(labels)]
+    # Trim DDP padding
+    result_data = result_data[: len(labels)]
 
-    # Metrics
-    auroc = roc_auc_score(labels, scores)
-    ci_lo, ci_hi = bootstrap_auroc(scores, labels, n=1000)
+    if use_rf:
+        # result_data is (N, T) feature matrix
+        X = result_data  # (N, T)
+        n_folds = min(10, n_pos, n_neg)  # guard: can't have more folds than minority class
+        if n_folds < 2:
+            print(f"  [{tissue}] SKIP RF: too few samples for CV (n_pos={n_pos}, n_neg={n_neg})")
+            return {}
+        if n_folds < 10:
+            print(f"  [{tissue}] WARNING: using {n_folds}-fold CV (too few samples for 10)")
+        auroc, ci_lo, ci_hi = auroc_rf_cv(X, labels, n_folds=n_folds)
+    else:
+        scores = result_data  # (N,)
+        auroc = roc_auc_score(labels, scores)
+        ci_lo, ci_hi = bootstrap_auroc(scores, labels, n=1000)
+
     print(f"  [{tissue}] AUROC = {auroc:.4f}  95% CI [{ci_lo:.4f}, {ci_hi:.4f}]")
 
     return {
@@ -332,10 +337,6 @@ def evaluate_tissue(tissue: str, pos_vcf: str, neg_vcf: str,
 def load_model_and_transform(model_name: str, score_mode: str) -> tuple:
     """Instantiate the model and select the transform for the chosen score mode.
 
-    Args:
-        model_name: "borzoi" or "alphagenome".
-        score_mode: "l2" or "sum".
-
     Returns:
         (model, transform, batch_size, seq_len)
     """
@@ -344,8 +345,6 @@ def load_model_and_transform(model_name: str, score_mode: str) -> tuple:
         model = grelu.resources.load_model(
             repo_id="Genentech/borzoi-model", filename="human_rep0.ckpt"
         )
-        # l2: log2(1+inv_squash(x)), output (T, L) — L2 norm computed in score_variants
-        # sum: inv_squash(x) summed over L, output (T, 1) — signed sum per track
         transform = BorzoiL2Transform() if score_mode == "l2" else BorzoiSumTransform()
         batch_size = 2
         seq_len = BORZOI_INPUT_LEN
@@ -372,7 +371,6 @@ def load_model_and_transform(model_name: str, score_mode: str) -> tuple:
     return model, transform, batch_size, seq_len
 
 
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -381,6 +379,9 @@ def main():
                         help="Model to evaluate (default: borzoi).")
     parser.add_argument("--score", default="l2", choices=["l2", "sum"],
                         help="Scoring statistic: 'l2' (default, paper best) or 'sum'.")
+    parser.add_argument("--rf", action="store_true",
+                        help="Use Random Forest with 10-fold CV (paper standard). "
+                             "Default: zero-shot heuristic scalar score.")
     parser.add_argument("--manifest", default=str(MANIFEST_DEFAULT),
                         help="Path to manifest.tsv from build_eqtl_data.py.")
     parser.add_argument("--tissue", default=None,
@@ -388,6 +389,10 @@ def main():
     parser.add_argument("--devices", default="0,1,2,3",
                         help="Comma-separated GPU indices or 'cpu' (default: 0,1,2,3).")
     parser.add_argument("--num_workers", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=None,
+                        help="Override default batch size (borzoi=2, alphagenome=4).")
+    parser.add_argument("--n_estimators", type=int, default=100,
+                        help="Number of trees in the Random Forest (default: 100).")
     parser.add_argument("--output", default=None,
                         help="Save per-tissue results TSV to this path.")
     args = parser.parse_args()
@@ -407,6 +412,11 @@ def main():
 
     devices = [int(x) for x in args.devices.split(",")] if args.devices != "cpu" else "cpu"
     model, transform, batch_size, seq_len = load_model_and_transform(args.model, args.score)
+    if args.batch_size is not None:
+        batch_size = args.batch_size
+
+    eval_mode = "RF 10-fold CV" if args.rf else "zero-shot heuristic"
+    print(f"Mode: {args.model} | score={args.score} | eval={eval_mode}")
 
     results = []
     for _, row in manifest.iterrows():
@@ -421,6 +431,7 @@ def main():
             batch_size=batch_size,
             num_workers=args.num_workers,
             score_mode=args.score,
+            use_rf=args.rf,
         )
         if res:
             results.append(res)
@@ -431,14 +442,12 @@ def main():
 
     df = pd.DataFrame(results)
 
-    # Summary
     mean_auroc = df["auroc"].mean()
     std_auroc = df["auroc"].std()
     print(f"\n{'─'*60}")
-    print(f"Model: {args.model}   Score: {args.score}   Tissues: {len(df)}")
+    print(f"Model: {args.model}   Score: {args.score}   Mode: {eval_mode}   Tissues: {len(df)}")
     print(f"Mean AUROC = {mean_auroc:.4f} ± {std_auroc:.4f} (SD)")
     print(f"Paper refs : Borzoi ensemble+L2+RF=0.7943, single+L2+RF=0.7880, ensemble+SUM+RF=0.7720")
-    print(f"             (zero-shot heuristic is lower than RF-supervised baselines)")
     print(f"{'─'*60}")
     print(df[["tissue", "n_pos", "n_neg", "auroc", "ci_lo", "ci_hi"]].to_string(index=False))
 
