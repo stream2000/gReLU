@@ -1,46 +1,42 @@
 """eQTL AUROC benchmark (Linder et al. 2025, Nature Genetics Fig. 5b standard).
 
-Scores pos/neg VCF pairs with L2 score (default) or |SUM score| and computes
+Scores pos/neg VCF pairs with SAD score (default, paper standard) and computes
 per-tissue AUROC across 49 GTEx tissues.
 
 Scoring modes (--score argument):
-  l2  [default]  Per-track logSUM approximation of the paper's L2 score.
-                 u_t = Σ_l log2(1 + y_count_l)  per track (in transform)
-                 zero-shot: score = Σ_t |u_t^alt - u_t^ref|  (single scalar)
-                 RF mode:   features = [|u_t^alt - u_t^ref| for t=1..T]  (T-dim)
+  sum [default]  Paper SAD: per-track count-space sum after full piecewise inverse
+                 squash. u_t = Σ_l (y_alt - y_ref) per track.
+                 zero-shot: |Σ_t u_t|   RF mode: signed (N, T) feature matrix.
 
-  sum            Per-track sum in count space after full piecewise inverse squash.
-                 u_t = Σ_l (y_alt^count - y_ref^count) per track
-                 zero-shot: score = |Σ_t u_t|
-                 RF mode:   features = [(u_t^alt - u_t^ref) for t=1..T]  (T-dim)
+  l2             Log-space approximation: u_t = Σ_l log2(1 + y_count_l) per track.
+                 zero-shot: Σ_t |u_t^alt - u_t^ref|
+                 RF mode: signed per-track logSUM diff (N, T).
 
-Evaluation modes:
-  zero-shot  [default]  Single heuristic scalar → direct AUROC (no training).
-  --rf                  Random Forest classifier on T-dim feature vector with
-                        tenfold stratified cross-validation (paper standard).
-                        Matches paper numbers: 0.7943 (4-rep+L2+RF), 0.7880 (single+L2+RF).
+Paper standard: --score sum --rc --rf  →  matches single-model SAD+RF baseline.
+Add --rc for forward+reverse complement averaging (~1-2% AUROC gain).
 
-Relationship to paper AUROC numbers:
-  - 0.7943 (Fig. 5b) = 4-rep ensemble + L2 + supervised RF + 10-fold CV
-  - 0.7880 = single model + L2 + supervised RF + 10-fold CV
-  - 0.7720 = ensemble + SUM + supervised RF + 10-fold CV
-  - Zero-shot L2 is lower because RF learns tissue-specific track weights.
+Paper AUROC refs:
+  - 0.7943 = 4-rep ensemble + SAD + RF + RC
+  - 0.7880 = single model + SAD + RF + RC
+  - 0.7720 = ensemble + SAD + RF (no RC?)
 
 Usage:
     source activate.sh
 
-    # Zero-shot (heuristic, no RF):
-    python scripts/eqtl/run_eqtl_auroc.py --model borzoi --devices 0
-
-    # RF (paper standard, 10-fold CV):
-    python scripts/eqtl/run_eqtl_auroc.py --model borzoi --rf --devices 0
+    # Paper standard (SAD + RC + RF):
+    python scripts/eqtl/run_eqtl_auroc.py --model borzoi --rc --rf --devices 0
 
     # Single tissue:
-    python scripts/eqtl/run_eqtl_auroc.py --model borzoi --tissue brain_cortex --rf --devices 0
+    python scripts/eqtl/run_eqtl_auroc.py --model borzoi --tissue brain_cortex --rc --rf --devices 0
 """
 import argparse
 import sys
+import warnings
 from pathlib import Path
+
+# Suppress PyTorch's weights_only=False warning from Lightning
+warnings.filterwarnings("ignore", message=".*weights_only=False.*", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*weights_only=False.*", category=UserWarning)
 
 import numpy as np
 import pandas as pd
@@ -49,7 +45,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import KFold
 
 import grelu.resources
 from grelu.lightning import LightningModel
@@ -77,11 +73,12 @@ def filter_edge_variants(df: pd.DataFrame, seq_len: int) -> pd.Series:
     half = seq_len // 2
     chrom_sz = df["chrom"].map(HG38_CHROM_SIZES)
     ok = (
-        df["chrom"].isin(HG38_CHROM_SIZES) &
-        (df["pos"] - half >= 0) &
-        (df["pos"] + half <= chrom_sz)
+            df["chrom"].isin(HG38_CHROM_SIZES) &
+            (df["pos"] - half >= 0) &
+            (df["pos"] + half <= chrom_sz)
     )
     return ok
+
 
 MANIFEST_DEFAULT = Path("~/.cache/eqtl_finemapping/paper_vcfs/manifest.tsv").expanduser()
 
@@ -106,6 +103,7 @@ def _inverse_squash_borzoi(x: torch.Tensor) -> torch.Tensor:
 
 class BorzoiSumTransform(nn.Module):
     """Full piecewise inverse Borzoi squash → sum across length bins. Output: (T, 1)."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = _inverse_squash_borzoi(x)
         return x.sum(dim=-1, keepdim=True)
@@ -120,6 +118,7 @@ class BorzoiL2Transform(nn.Module):
     For RF features, we use the signed per-track logSUM diff (N, T), giving the
     RF the same information as a T-dim feature vector.
     """
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         log_x = torch.log2(1.0 + _inverse_squash_borzoi(x))
         return log_x.sum(dim=-1, keepdim=True)  # (T, L) → (T, 1)
@@ -127,12 +126,14 @@ class BorzoiL2Transform(nn.Module):
 
 class AGSumTransform(nn.Module):
     """AlphaGenome sum score: sum across length bins. Output: (T, 1)."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.sum(dim=-1, keepdim=True)
 
 
 class AGL2Transform(nn.Module):
     """AlphaGenome log-space sum per track. Output: (T, 1)."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.log2(1.0 + x.clamp(min=0)).sum(dim=-1, keepdim=True)
 
@@ -176,13 +177,15 @@ def bootstrap_auroc(scores: np.ndarray, labels: np.ndarray,
 
 def score_variants(vdf: pd.DataFrame, model, transform: nn.Module,
                    devices: list[int], batch_size: int, num_workers: int,
-                   seq_len: int, score_mode: str = "l2",
-                   return_per_track: bool = False) -> np.ndarray:
+                   seq_len: int, score_mode: str = "sum",
+                   return_per_track: bool = False,
+                   rc: bool = False) -> np.ndarray:
     """Predict variant effects and return scores or per-track feature matrix.
 
     Args:
         return_per_track: If True, return (N, T) feature matrix for RF training.
                           If False (default), return (N,) scalar scores.
+        rc: Average forward and reverse complement predictions.
 
     Returns:
         (N, T) feature matrix when return_per_track=True, else (N,) scores.
@@ -198,16 +201,16 @@ def score_variants(vdf: pd.DataFrame, model, transform: nn.Module,
         return_ad=False,
         prediction_transform=transform,
         seq_len=seq_len,
+        rc=rc,
     )
 
     if score_mode == "l2":
         # diffs: (N, T, 1) — per-track log-space sums (from BorzoiL2Transform / AGL2Transform)
         per_track = diffs.squeeze(-1)  # (N, T) signed per-track logSUM diff
         if return_per_track:
-            # RF features: abs(per-track logSUM diff), matching paper's L2 spirit.
-            # Sign cancellation across bins is already eliminated by the logSUM;
-            # taking abs gives a non-negative T-dim feature vector per variant.
-            return np.abs(per_track)  # (N, T)
+            # RF features: signed per-track logSUM diff.
+            # Paper says: "For RF models, we provide the signed difference to allow the RF to learn the direction"
+            return per_track  # (N, T)
         return np.abs(per_track).sum(axis=-1)  # (N,) zero-shot heuristic
     else:
         # diffs: (N, T, 1) count-space per-track sums
@@ -220,39 +223,60 @@ def score_variants(vdf: pd.DataFrame, model, transform: nn.Module,
 # ── Random Forest evaluation ──────────────────────────────────────────────────
 
 def auroc_rf_cv(X: np.ndarray, y: np.ndarray,
-                n_folds: int = 10, n_estimators: int = 100,
-                seed: int = 42) -> tuple[float, float, float]:
-    """Tenfold stratified CV AUROC with a Random Forest, matching paper method.
+                n_folds: int = 8, n_iterations: int = 100,
+                n_estimators: int = 100, seed: int = 44) -> tuple[float, float, float]:
+    """Random Forest CV AUROC — strictly matches Borzoi's `randfor_roc` (paper standard).
 
-    The paper trains one RF per tissue on the T-dim per-track feature vector
-    using eQTL causal (1) vs non-causal (0) labels, then evaluates with
-    tenfold CV. AUROC is computed from concatenated out-of-fold predictions.
+    Reference: borzoi/src/scripts/borzoi_bench_classify.py::randfor_roc
+    Pipeline:  borzoi/src/scripts/borzoi_bench_gtex_folds_sad.py
+               → calls borzoi_bench_classify.py with `-i 100 -p 2 -r 44 -s --msl 1`
+
+    Method:
+      - KFold (NOT stratified) with shuffle=True
+      - n_iterations rounds, each with random_state = seed + i
+      - Per-fold RF random_state = (seed + i) + test_index[0]
+      - Collect per-fold AUROC across all iterations × folds
+      - Report mean ± SE (std / sqrt(N))
 
     Args:
-        X: Feature matrix (N, T) — per-track scores.
+        X: Feature matrix (N, T) — per-track signed differences.
         y: Binary labels (N,) — 1=eQTL, 0=negative.
-        n_folds: Number of CV folds (paper uses 10).
-        n_estimators: Trees in the forest.
-        seed: Random seed.
+        n_folds: Borzoi default = 8.
+        n_iterations: Borzoi GTEx pipeline default = 100.
+        n_estimators: Trees in the forest (Borzoi = 100).
+        seed: Borzoi GTEx pipeline default = 44.
 
     Returns:
-        (auroc, ci_lo, ci_hi)
+        (mean_auroc, mean - SE, mean + SE)
     """
-    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
-    oof_scores = np.zeros(len(y))
+    aurocs = []
+    for i in range(n_iterations):
+        rs_iter = seed + i
+        kf = KFold(n_splits=n_folds, shuffle=True, random_state=rs_iter)
 
-    for train_idx, test_idx in skf.split(X, y):
-        clf = RandomForestClassifier(
-            n_estimators=n_estimators,
-            n_jobs=-1,
-            random_state=seed,
-        )
-        clf.fit(X[train_idx], y[train_idx])
-        oof_scores[test_idx] = clf.predict_proba(X[test_idx])[:, 1]
+        for train_idx, test_idx in kf.split(X):
+            rs_rf = rs_iter + int(test_idx[0])
+            clf = RandomForestClassifier(
+                n_estimators=n_estimators,
+                max_features='log2',
+                max_depth=64,
+                min_samples_split=2,
+                min_samples_leaf=1,
+                n_jobs=-1,
+                random_state=rs_rf,
+            )
+            clf.fit(X[train_idx], y[train_idx])
+            preds = clf.predict_proba(X[test_idx])[:, 1]
+            # KFold can produce a fold with only one class label when n is small;
+            # roc_auc_score requires both classes — skip degenerate folds.
+            if len(np.unique(y[test_idx])) < 2:
+                continue
+            aurocs.append(roc_auc_score(y[test_idx], preds))
 
-    auroc = roc_auc_score(y, oof_scores)
-    ci_lo, ci_hi = bootstrap_auroc(oof_scores, y, n=1000, seed=seed)
-    return auroc, ci_lo, ci_hi
+    aurocs = np.array(aurocs)
+    mean_auroc = float(aurocs.mean())
+    se = float(aurocs.std() / np.sqrt(len(aurocs)))
+    return mean_auroc, mean_auroc - se, mean_auroc + se
 
 
 # ── Per-tissue evaluation ────────────────────────────────────────────────────
@@ -260,7 +284,9 @@ def auroc_rf_cv(X: np.ndarray, y: np.ndarray,
 def evaluate_tissue(tissue: str, pos_vcf: str, neg_vcf: str,
                     model, transform: nn.Module, seq_len: int,
                     devices: list[int], batch_size: int, num_workers: int,
-                    score_mode: str = "l2", use_rf: bool = False) -> dict:
+                    score_mode: str = "sum", use_rf: bool = False,
+                    rc: bool = False,
+                    save_features_dir: str = None) -> dict:
     """Full evaluation pipeline for a single GTEx tissue.
 
     1. Load eQTL (pos) and negative (neg) VCFs.
@@ -289,38 +315,65 @@ def evaluate_tissue(tissue: str, pos_vcf: str, neg_vcf: str,
     all_variants = pd.concat([pos_df, neg_df], ignore_index=True)
     labels = np.array([1] * n_pos + [0] * n_neg)
 
-    mode_str = "RF 10-fold CV" if use_rf else "zero-shot"
+    mode_str = "RF 8-fold CV ×100" if use_rf else "zero-shot"
+
+    # DDP rank guard for setup (VCF loading, filtering, printing)
+    # Only rank 0 does this work. Other ranks will participate via score_variants -> PL
+    is_dist = torch.distributed.is_available() and torch.distributed.is_initialized()
+    if is_dist and torch.distributed.get_rank() != 0:
+        result_data = score_variants(
+            all_variants, model, transform, devices, batch_size,
+            num_workers, seq_len, score_mode=score_mode,
+            return_per_track=use_rf, rc=rc,
+        )
+        return {}
+
     print(f"  [{tissue}] scoring {n_pos} pos + {n_neg} neg ({mode_str}) ...")
 
     result_data = score_variants(
         all_variants, model, transform, devices, batch_size,
         num_workers, seq_len, score_mode=score_mode,
-        return_per_track=use_rf,
+        return_per_track=use_rf, rc=rc,
     )
 
-    # DDP: only rank 0 has valid gathered results
-    if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
-        return {}
+    # DDP rank guard: only rank 0 should run RF evaluation and save files
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        if torch.distributed.get_rank() != 0:
+            return {}
 
     # Trim DDP padding
-    result_data = result_data[: len(labels)]
+    if len(result_data) < len(labels):
+        labels = labels[: len(result_data)]
+    else:
+        result_data = result_data[: len(labels)]
 
     if use_rf:
         # result_data is (N, T) feature matrix
         X = result_data  # (N, T)
-        n_folds = min(10, n_pos, n_neg)  # guard: can't have more folds than minority class
+        # Borzoi default: 8 folds × 100 iterations
+        n_folds = min(8, n_pos, n_neg)
         if n_folds < 2:
             print(f"  [{tissue}] SKIP RF: too few samples for CV (n_pos={n_pos}, n_neg={n_neg})")
             return {}
-        if n_folds < 10:
-            print(f"  [{tissue}] WARNING: using {n_folds}-fold CV (too few samples for 10)")
-        auroc, ci_lo, ci_hi = auroc_rf_cv(X, labels, n_folds=n_folds)
+        if n_folds < 8:
+            print(f"  [{tissue}] WARNING: using {n_folds}-fold CV (too few samples for 8)")
+
+        if save_features_dir is not None:
+            import pathlib
+            fdir = pathlib.Path(save_features_dir)
+            fdir.mkdir(parents=True, exist_ok=True)
+            np.save(fdir / f"{tissue}_X.npy", X)
+            np.save(fdir / f"{tissue}_y.npy", labels)
+            print(f"  [{tissue}] features saved → {fdir}/{tissue}_X.npy  shape={X.shape}")
+
+        auroc, ci_lo, ci_hi = auroc_rf_cv(X, labels, n_folds=n_folds, n_iterations=100)
     else:
         scores = result_data  # (N,)
         auroc = roc_auc_score(labels, scores)
         ci_lo, ci_hi = bootstrap_auroc(scores, labels, n=1000)
 
-    print(f"  [{tissue}] AUROC = {auroc:.4f}  95% CI [{ci_lo:.4f}, {ci_hi:.4f}]")
+    band = "±SE" if use_rf else "95% CI"
+    print(f"  [{tissue}] AUROC = {auroc:.4f}  {band} [{ci_lo:.4f}, {ci_hi:.4f}]")
 
     return {
         "tissue": tissue,
@@ -350,11 +403,14 @@ def load_model_and_transform(model_name: str, score_mode: str) -> tuple:
         seq_len = BORZOI_INPUT_LEN
 
     elif model_name == "alphagenome":
-        print("Loading AlphaGenome ...")
+        print("Loading AlphaGenome (all 7 standard track heads, ~4992 tracks) ...")
+        # output_key="all" concatenates atac+dnase+procap+cage+rna_seq+chip_tf+chip_histone
+        # along the channel dim. This makes the AG variant score comparable to Borzoi's,
+        # which mixes all assays into its 7611-track output.
         model = LightningModel(
             model_params={
                 "model_type": "AlphaGenomeModel",
-                "output_key": "rna_seq",
+                "output_key": "all",
                 "weights_path": WEIGHTS_PATH,
                 "resolution": 128,
             },
@@ -377,10 +433,13 @@ def main():
     parser = argparse.ArgumentParser(description="eQTL AUROC benchmark (paper standard).")
     parser.add_argument("--model", default="borzoi", choices=["borzoi", "alphagenome"],
                         help="Model to evaluate (default: borzoi).")
-    parser.add_argument("--score", default="l2", choices=["l2", "sum"],
-                        help="Scoring statistic: 'l2' (default, paper best) or 'sum'.")
+    parser.add_argument("--score", default="sum", choices=["sum", "l2"],
+                        help="Scoring statistic: 'sum' (default, paper SAD) or 'l2' (log-space approx).")
+    parser.add_argument("--rc", action="store_true",
+                        help="Average forward and reverse complement predictions (paper standard).")
     parser.add_argument("--rf", action="store_true",
-                        help="Use Random Forest with 10-fold CV (paper standard). "
+                        help="Use Random Forest with 8-fold CV × 100 iterations "
+                             "(Borzoi paper standard, randfor_roc). "
                              "Default: zero-shot heuristic scalar score.")
     parser.add_argument("--manifest", default=str(MANIFEST_DEFAULT),
                         help="Path to manifest.tsv from build_eqtl_data.py.")
@@ -395,6 +454,9 @@ def main():
                         help="Number of trees in the Random Forest (default: 100).")
     parser.add_argument("--output", default=None,
                         help="Save per-tissue results TSV to this path.")
+    parser.add_argument("--save_features", default=None,
+                        help="Directory to save per-tissue feature matrices (X.npy, y.npy). "
+                             "Only used with --rf.")
     args = parser.parse_args()
 
     manifest_path = Path(args.manifest)
@@ -415,7 +477,7 @@ def main():
     if args.batch_size is not None:
         batch_size = args.batch_size
 
-    eval_mode = "RF 10-fold CV" if args.rf else "zero-shot heuristic"
+    eval_mode = "RF 8-fold CV ×100 iters" if args.rf else "zero-shot heuristic"
     print(f"Mode: {args.model} | score={args.score} | eval={eval_mode}")
 
     results = []
@@ -432,6 +494,8 @@ def main():
             num_workers=args.num_workers,
             score_mode=args.score,
             use_rf=args.rf,
+            rc=args.rc,
+            save_features_dir=args.save_features,
         )
         if res:
             results.append(res)
@@ -444,11 +508,11 @@ def main():
 
     mean_auroc = df["auroc"].mean()
     std_auroc = df["auroc"].std()
-    print(f"\n{'─'*60}")
+    print(f"\n{'─' * 60}")
     print(f"Model: {args.model}   Score: {args.score}   Mode: {eval_mode}   Tissues: {len(df)}")
     print(f"Mean AUROC = {mean_auroc:.4f} ± {std_auroc:.4f} (SD)")
     print(f"Paper refs : Borzoi ensemble+L2+RF=0.7943, single+L2+RF=0.7880, ensemble+SUM+RF=0.7720")
-    print(f"{'─'*60}")
+    print(f"{'─' * 60}")
     print(df[["tissue", "n_pos", "n_neg", "auroc", "ci_lo", "ci_hi"]].to_string(index=False))
 
     if args.output:

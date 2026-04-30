@@ -834,10 +834,40 @@ class LightningModel(pl.LightningModule):
         # Predict
         preds = torch.concat(trainer.predict(self, dataloader))
         if trainer.world_size > 1 and torch.distributed.is_initialized():
-            preds = preds.contiguous().cuda(trainer.local_rank)
-            gathered_preds = [torch.zeros_like(preds) for _ in range(trainer.world_size)]
+            rank = trainer.local_rank
+            world = trainer.world_size
+            device = torch.device(f"cuda:{rank}")
+
+            # Each rank may have a different number of predictions.
+            # Exchange counts first so we can pad to uniform all_gather buffer sizes.
+            local_size = torch.tensor([preds.shape[0]], device=device)
+            all_sizes = [torch.zeros_like(local_size) for _ in range(world)]
+            torch.distributed.all_gather(all_sizes, local_size)
+            max_sz = max(int(s.item()) for s in all_sizes)
+
+            preds = preds.to(device)
+            if preds.shape[0] < max_sz:
+                pad = torch.zeros(
+                    max_sz - preds.shape[0], *preds.shape[1:],
+                    dtype=preds.dtype, device=device,
+                )
+                preds = torch.cat([preds, pad], dim=0)
+
+            preds = preds.contiguous()
+            gathered_preds = [torch.zeros_like(preds) for _ in range(world)]
             torch.distributed.all_gather(gathered_preds, preds)
+
+            # DistributedSampler (shuffle=False) is stride-based:
+            #   rank r gets indices [r, r+W, r+2W, ...]
+            # stack + view interleaves ranks to restore original order.
             preds = torch.stack(gathered_preds, dim=1).view(-1, *preds.shape[1:]).cpu()
+
+            # Discard padding added for uniformity
+            total_real = sum(int(s.item()) for s in all_sizes)
+            preds = preds[:total_real]
+        n_group = dataset.n_augmented * getattr(dataset, "n_alleles", 1)
+        limit = (len(preds) // n_group) * n_group
+        preds = preds[: min(len(dataset), limit)]
 
         if isinstance(dataset, (SeqDataset, LabeledSeqDataset)):
 

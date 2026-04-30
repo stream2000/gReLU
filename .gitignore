@@ -62,7 +62,10 @@ comparison_*.png
 /eval_data/
 
 # Local ignored docs
-doc/
+agent-doc/
 activate.sh
-/docs/plan&reports/
-/docs/ref/
+/agent-doc/plan&reports/
+/agent-doc/ref/
+/results/
+/scripts/eqtl/results_all_tissues/
+/scripts/eqtl/ref/
