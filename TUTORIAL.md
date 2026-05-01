@@ -58,10 +58,10 @@ pip install -e ~/gReLU
 
 ## 4. Configure shared genome data (one-time)
 
-Scripts need hg38 genome sequences and annotations (FASTA + GTF). Point genomepy to the shared copy:
+Scripts need hg38 genome sequences and annotations (FASTA + GTF). Find the genomepy config file with `genomepy config file`, then set `genomes_dir` to the shared copy:
 
-```bash
-genomepy config set genomes_dir /work/gReLU/genomes
+```yaml
+genomes_dir: /work/gReLU/genomes
 ```
 
 ## 6. Activate every session
