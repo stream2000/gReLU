@@ -50,6 +50,7 @@ from sklearn.model_selection import KFold
 import grelu.resources
 from grelu.lightning import LightningModel
 from grelu.variant import predict_variant_effects
+from alphagenome_pytorch.config import DtypePolicy
 
 from scripts.smoke_tests.config import (
     WEIGHTS_PATH, AG_META_PATH, BORZOI_INPUT_LEN, AG_INPUT_LEN, AG_BIN_SIZE,
@@ -138,7 +139,7 @@ class AGL2Transform(nn.Module):
         return torch.log2(1.0 + x.clamp(min=0)).sum(dim=-1, keepdim=True)
 
 
-# ── VCF loading ───────────────────────────────────────────────────────────────
+# ── VCF(Variant Call Format) loading ───────────────────────────────────────────────────────────────
 
 def load_vcf(path: str | Path) -> pd.DataFrame:
     """Load a minimal VCF into a DataFrame with chrom/pos/ref/alt columns."""
@@ -413,13 +414,14 @@ def load_model_and_transform(model_name: str, score_mode: str) -> tuple:
                 "output_key": "all",
                 "weights_path": WEIGHTS_PATH,
                 "resolution": 128,
+                "dtype_policy": DtypePolicy.mixed_precision(),
             },
             train_params={"task": "regression", "loss": "mse"},
         )
         model.data_params["train"] = {"seq_len": AG_INPUT_LEN, "bin_size": AG_BIN_SIZE}
         model.model_params["crop_len"] = 0
         transform = AGL2Transform() if score_mode == "l2" else AGSumTransform()
-        batch_size = 4
+        batch_size = 1
         seq_len = AG_INPUT_LEN
     else:
         raise ValueError(f"Unknown model: {model_name}. Choose 'borzoi' or 'alphagenome'.")

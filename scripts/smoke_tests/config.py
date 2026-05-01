@@ -24,8 +24,8 @@ AG_META_PATH = (
 BORZOI_INPUT_LEN = 524_288   # Borzoi receptive field in bp
 BORZOI_BIN_SIZE  = 32        # Borzoi output bin resolution in bp
 
-AG_INPUT_LEN  = 131_072      # AlphaGenome receptive field in bp
+AG_INPUT_LEN  = 1_048_576    # AlphaGenome receptive field in bp (1 Mb)
 AG_BIN_SIZE   = 128          # AlphaGenome output bin resolution in bp
-AG_OUTPUT_BINS = AG_INPUT_LEN // AG_BIN_SIZE  # 1024
+AG_OUTPUT_BINS = AG_INPUT_LEN // AG_BIN_SIZE  # 8192
 
 ISM_HALF_WIDTH = 100         # ±100 bp window around ISM centre
