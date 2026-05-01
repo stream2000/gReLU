@@ -11,8 +11,10 @@ ISM_RESULTS_DIR = "ism_results"
 os.makedirs(ISM_RESULTS_DIR, exist_ok=True)
 
 # ── Model weights / metadata ──────────────────────────────────────────────────
-WEIGHTS_PATH = os.path.expanduser(
-    "~/.cache/huggingface/hub/models--gtca--alphagenome_pytorch/"
+_hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+WEIGHTS_PATH = os.path.join(
+    _hf_home,
+    "hub/models--gtca--alphagenome_pytorch/"
     "snapshots/b01c0ffa73e07c053491f3b5ea8bcf67d93b9920/model_fold_0.safetensors"
 )
 
