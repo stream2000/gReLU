@@ -22,6 +22,7 @@ import grelu.io
 import grelu.resources
 import grelu.sequence
 import grelu.transforms
+import grelu.transforms.prediction_transforms
 from grelu.lightning import LightningModel
 from scripts.smoke_tests.config import (
     BORZOI_INPUT_LEN, BORZOI_BIN_SIZE,
