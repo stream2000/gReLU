@@ -56,7 +56,15 @@ pip install -e ~/gReLU/src/alphagenome_pytorch
 pip install -e ~/gReLU
 ```
 
-## 4. Activate every session
+## 4. Configure shared genome data (one-time)
+
+Scripts need hg38 genome sequences and annotations (FASTA + GTF). Point genomepy to the shared copy:
+
+```bash
+genomepy config set genomes_dir /work/gReLU/genomes
+```
+
+## 6. Activate every session
 
 ```bash
 source ~/gReLU/activate.sh
@@ -85,6 +93,7 @@ python -m scripts.run_inference --gene SRSF11 --devices 0
 python scripts/eqtl/run_eqtl_auroc.py \
     --model alphagenome --tissue brain_cortex \
     --score sum --rc --rf --devices 0 \
+    --manifest /work/gReLU/eqtl_data/paper_vcfs/manifest.tsv \
     --output ~/results/ag_brain_cortex.tsv
 ```
 
