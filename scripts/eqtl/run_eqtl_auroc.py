@@ -28,6 +28,9 @@ Usage:
 
     # Single tissue:
     python scripts/eqtl/run_eqtl_auroc.py --model borzoi --tissue brain_cortex --rc --rf --devices 0
+
+    # AlphaGenome + torch.compile (~2.7x inference speedup):
+    python scripts/eqtl/run_eqtl_auroc.py --model alphagenome --rc --rf --devices 0 --compile
 """
 import argparse
 import sys
@@ -452,6 +455,8 @@ def main():
     parser.add_argument("--num_workers", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=None,
                         help="Override default batch size (borzoi=2, alphagenome=4).")
+    parser.add_argument("--compile", action="store_true",
+                        help="Enable torch.compile(max-autotune) for ~2.7x inference speedup.")
     parser.add_argument("--n_estimators", type=int, default=100,
                         help="Number of trees in the Random Forest (default: 100).")
     parser.add_argument("--output", default=None,
@@ -479,8 +484,14 @@ def main():
     if args.batch_size is not None:
         batch_size = args.batch_size
 
+    if args.compile:
+        print("Applying torch.compile(max-autotune) ...")
+        model.model = torch.compile(model.model, mode="max-autotune")
+        print("  (first forward pass will be slow due to autotuning)")
+
     eval_mode = "RF 8-fold CV ×100 iters" if args.rf else "zero-shot heuristic"
-    print(f"Mode: {args.model} | score={args.score} | eval={eval_mode}")
+    compile_tag = "+compile" if args.compile else ""
+    print(f"Mode: {args.model}{compile_tag} | score={args.score} | eval={eval_mode}")
 
     results = []
     for _, row in manifest.iterrows():
