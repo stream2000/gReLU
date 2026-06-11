@@ -19,7 +19,7 @@ WEIGHTS_PATH="${WEIGHTS_PATH:-/home/fqijun/.cache/alphagenome/model_fold_0.safet
 
 mkdir -p "${OUT_DIR}"
 
-python scripts/ism/make_mreg_ctcf_example.py \
+python scripts/ism/examples/mreg/make_mreg_ctcf_example.py \
   --fasta "${FASTA}" \
   --gtf "${GTF}" \
   --n_sites "${N_SITES}" \

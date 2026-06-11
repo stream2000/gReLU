@@ -24,13 +24,13 @@ if str(REPO_ROOT) not in sys.path:
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from scripts.ism.make_matched_boundary_pilot import (  # noqa: E402
+from scripts.ism.legacy.make_matched_boundary_pilot import (  # noqa: E402
     AG_INPUT_LEN,
     choose_max_ic_variant,
     choose_nearby_control,
     get_ctcf_peaks,
 )
-from scripts.ism.prepare_ctcf_sites import (  # noqa: E402
+from scripts.ism.legacy.prepare_ctcf_sites import (  # noqa: E402
     CANONICAL_HG38,
     DEFAULT_FASTA,
     DEFAULT_MEME,

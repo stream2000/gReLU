@@ -34,6 +34,98 @@ def center_mask(window_bins: pd.DataFrame, center_bp: int) -> np.ndarray:
     return mask
 
 
+def infer_bin_size_bp(window_bins: pd.DataFrame) -> int:
+    """Infer model bin size from adjacent ``offset_bp`` values."""
+
+    offsets = np.sort(window_bins["offset_bp"].astype(int).unique())
+    if len(offsets) < 2:
+        raise ValueError("Need at least two window bins to infer bin size")
+    diffs = np.diff(offsets)
+    return int(np.median(diffs))
+
+
+def center_bp_signal_coordinates(
+    window_bins: pd.DataFrame,
+    center_bp: int,
+    bin_size_bp: int | None = None,
+) -> pd.DataFrame:
+    """Map each requested center bp to the nearest saved model bin."""
+
+    if "offset_bp" not in window_bins.columns:
+        raise ValueError("all_track_window_bins.tsv must contain offset_bp")
+    bin_size_bp = infer_bin_size_bp(window_bins) if bin_size_bp is None else int(bin_size_bp)
+    if bin_size_bp <= 0:
+        raise ValueError(f"bin_size_bp must be positive, got {bin_size_bp}")
+
+    start_offset = -(int(center_bp) // 2)
+    bp_offsets = start_offset + np.arange(int(center_bp), dtype=int)
+    bin_offsets = window_bins["offset_bp"].to_numpy(dtype=int)
+    nearest = np.abs(bp_offsets[:, None] - bin_offsets[None, :]).argmin(axis=1)
+
+    if bin_size_bp == 1:
+        coverage_left = int(bin_offsets.min())
+        coverage_right = int(bin_offsets.max() + 1)
+    else:
+        coverage_left = int(np.floor(bin_offsets.min() - bin_size_bp / 2.0))
+        coverage_right = int(np.ceil(bin_offsets.max() + bin_size_bp / 2.0))
+    if bp_offsets.min() < coverage_left or bp_offsets.max() >= coverage_right:
+        raise ValueError(
+            f"Requested center_bp={center_bp} exceeds saved window coverage "
+            f"[{coverage_left}, {coverage_right}) bp. Rerun track_window with a wider window."
+        )
+
+    coords = pd.DataFrame(
+        {
+            "bp_index": np.arange(int(center_bp), dtype=int),
+            "bp_offset": bp_offsets,
+            "source_window_bin_index": nearest.astype(int),
+            "source_bin_offset_bp": bin_offsets[nearest].astype(int),
+        }
+    )
+    if "model_bin_index" in window_bins.columns:
+        model_bins = window_bins["model_bin_index"].to_numpy(dtype=int)
+        coords["source_model_bin_index"] = model_bins[nearest].astype(int)
+    coords["bin_size_bp"] = bin_size_bp
+    return coords
+
+
+def expand_center_bp_signals(
+    ref: np.ndarray,
+    alt: np.ndarray,
+    window_bins: pd.DataFrame,
+    center_bp: int = 1000,
+    bin_size_bp: int | None = None,
+    pseudocount: float = 1.0,
+) -> tuple[dict[str, np.ndarray], pd.DataFrame]:
+    """Expand saved model-bin signals onto a 1-bp axis inside the center mask."""
+
+    if ref.shape != alt.shape:
+        raise ValueError(f"Shape mismatch: ref={ref.shape}, alt={alt.shape}")
+    if ref.ndim != 3:
+        raise ValueError(f"Expected sites x tracks x bins arrays, got {ref.shape}")
+    if len(window_bins) != ref.shape[2]:
+        raise ValueError(f"Window-bin rows {len(window_bins)} != n_bins {ref.shape[2]}")
+
+    coords = center_bp_signal_coordinates(window_bins, center_bp=center_bp, bin_size_bp=bin_size_bp)
+    source_bins = coords["source_window_bin_index"].to_numpy(dtype=int)
+    ref_bp = np.asarray(ref[:, :, source_bins], dtype=np.float32)
+    alt_bp = np.asarray(alt[:, :, source_bins], dtype=np.float32)
+    delta_bp = (alt_bp - ref_bp).astype(np.float32, copy=False)
+    log2fc_bp = (
+        np.log2(float(pseudocount) + np.maximum(alt_bp, 0.0))
+        - np.log2(float(pseudocount) + np.maximum(ref_bp, 0.0))
+    ).astype(np.float32, copy=False)
+    return (
+        {
+            "ref": ref_bp,
+            "alt": alt_bp,
+            "raw_change": delta_bp,
+            "log2fc": log2fc_bp,
+        },
+        coords,
+    )
+
+
 def _variant_columns(variants: pd.DataFrame) -> list[str]:
     keep = [
         "site_id",
@@ -66,6 +158,7 @@ def summarize_center_track_effects(
     variants: pd.DataFrame,
     window_bins: pd.DataFrame,
     center_bp: int = 1000,
+    pseudocount: float = 1.0,
 ) -> pd.DataFrame:
     """Return long-form per-site, per-track center-mask effect metrics."""
 
@@ -84,9 +177,9 @@ def summarize_center_track_effects(
     mask = center_mask(window_bins, center_bp)
     ref_center = np.asarray(ref[:, :, mask], dtype=np.float32)
     alt_center = np.asarray(alt[:, :, mask], dtype=np.float32)
-    delta = alt_center - ref_center
-    log_delta = np.log2(1.0 + np.maximum(alt_center, 0.0)) - np.log2(
-        1.0 + np.maximum(ref_center, 0.0)
+    raw_change = alt_center - ref_center
+    log2fc = np.log2(float(pseudocount) + np.maximum(alt_center, 0.0)) - np.log2(
+        float(pseudocount) + np.maximum(ref_center, 0.0)
     )
 
     meta = metadata.copy().reset_index(drop=True)
@@ -105,14 +198,15 @@ def summarize_center_track_effects(
             "n_center_bins": int(mask.sum()),
             "ref_mean": ref_center.mean(axis=2).reshape(-1),
             "alt_mean": alt_center.mean(axis=2).reshape(-1),
-            "delta_mean": delta.mean(axis=2).reshape(-1),
-            "delta_abs_mean": np.abs(delta).mean(axis=2).reshape(-1),
-            "delta_abs_max": np.abs(delta).max(axis=2).reshape(-1),
-            "delta_l2": np.linalg.norm(delta, axis=2).reshape(-1),
-            "log1p_delta_mean": log_delta.mean(axis=2).reshape(-1),
-            "log1p_abs_mean": np.abs(log_delta).mean(axis=2).reshape(-1),
-            "log1p_loss_mean": np.maximum(-log_delta, 0.0).mean(axis=2).reshape(-1),
-            "log1p_gain_mean": np.maximum(log_delta, 0.0).mean(axis=2).reshape(-1),
+            "pseudocount": float(pseudocount),
+            "raw_signed_change": raw_change.mean(axis=2).reshape(-1),
+            "raw_change_magnitude": np.abs(raw_change).mean(axis=2).reshape(-1),
+            "raw_max_change_magnitude": np.abs(raw_change).max(axis=2).reshape(-1),
+            "raw_change_l2": np.linalg.norm(raw_change, axis=2).reshape(-1),
+            "signed_log2_fold_change": log2fc.mean(axis=2).reshape(-1),
+            "log2_fold_change_magnitude": np.abs(log2fc).mean(axis=2).reshape(-1),
+            "loss_log2_fold_change_magnitude": np.maximum(-log2fc, 0.0).mean(axis=2).reshape(-1),
+            "gain_log2_fold_change_magnitude": np.maximum(log2fc, 0.0).mean(axis=2).reshape(-1),
         }
     )
     out = out.join(variant_meta.iloc[site_index].reset_index(drop=True))
@@ -138,6 +232,8 @@ def write_center_track_outputs(
     center_bp: int = 1000,
     top_n: int = 50,
     output_prefix: str = "center_1kb",
+    save_bp_signals: bool = True,
+    pseudocount: float = 1.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     run_dir = Path(run_dir)
     ref = np.load(run_dir / "all_track_ref_window.npy", mmap_mode="r")
@@ -153,17 +249,18 @@ def write_center_track_outputs(
         variants=variants,
         window_bins=bins,
         center_bp=center_bp,
+        pseudocount=pseudocount,
     )
     effects_path = run_dir / f"{output_prefix}_track_effects.tsv"
     effects.to_csv(effects_path, sep="\t", index=False)
 
     top = (
-        effects.sort_values(["site_id", "delta_abs_mean"], ascending=[True, False])
+        effects.sort_values(["site_id", "log2_fold_change_magnitude"], ascending=[True, False])
         .groupby("site_id", dropna=False)
         .head(top_n)
         .copy()
     )
-    top["rank_in_site"] = top.groupby("site_id", dropna=False)["delta_abs_mean"].rank(
+    top["rank_in_site"] = top.groupby("site_id", dropna=False)["log2_fold_change_magnitude"].rank(
         ascending=False, method="first"
     ).astype(int)
     top.to_csv(run_dir / f"{output_prefix}_top{top_n}_tracks_by_site.tsv", sep="\t", index=False)
@@ -171,16 +268,30 @@ def write_center_track_outputs(
     summary = (
         effects.groupby(["output_type", "target"], dropna=False)
         .agg(
-            n_tracks=("global_track_index", "nunique"),
-            mean_delta_abs_mean=("delta_abs_mean", "mean"),
-            max_delta_abs_mean=("delta_abs_mean", "max"),
-            mean_log1p_loss=("log1p_loss_mean", "mean"),
-            mean_log1p_gain=("log1p_gain_mean", "mean"),
+            track_count=("global_track_index", "nunique"),
+            typical_log2fc_magnitude=("log2_fold_change_magnitude", "median"),
+            top_log2fc_magnitude=("log2_fold_change_magnitude", "max"),
+            total_log2fc_magnitude=("log2_fold_change_magnitude", "sum"),
+            typical_loss_log2fc_magnitude=("loss_log2_fold_change_magnitude", "median"),
+            typical_gain_log2fc_magnitude=("gain_log2_fold_change_magnitude", "median"),
+            typical_raw_change_magnitude=("raw_change_magnitude", "median"),
+            top_raw_change_magnitude=("raw_change_magnitude", "max"),
         )
         .reset_index()
-        .sort_values("max_delta_abs_mean", ascending=False)
+        .sort_values("top_log2fc_magnitude", ascending=False)
     )
     summary.to_csv(run_dir / f"{output_prefix}_track_effect_summary.tsv", sep="\t", index=False)
+    if save_bp_signals:
+        bp_signals, bp_coords = expand_center_bp_signals(
+            ref,
+            alt,
+            window_bins=bins,
+            center_bp=center_bp,
+            pseudocount=pseudocount,
+        )
+        for name, array in bp_signals.items():
+            np.save(run_dir / f"{output_prefix}_{name}_bp_signal.npy", array)
+        bp_coords.to_csv(run_dir / f"{output_prefix}_bp_signal_coordinates.tsv", sep="\t", index=False)
     return effects, top, summary
 
 
@@ -190,6 +301,17 @@ def main() -> None:
     parser.add_argument("--center_bp", type=int, default=1000)
     parser.add_argument("--top_n", type=int, default=50)
     parser.add_argument("--output_prefix", default="center_1kb")
+    parser.add_argument(
+        "--pseudocount",
+        type=float,
+        default=1.0,
+        help="Pseudocount for log2((mut+p)/(ref+p)) fold-change metrics.",
+    )
+    parser.add_argument(
+        "--no_save_bp_signals",
+        action="store_true",
+        help="Skip dense site x track x bp raw-signal arrays.",
+    )
     args = parser.parse_args()
 
     effects, top, summary = write_center_track_outputs(
@@ -197,11 +319,19 @@ def main() -> None:
         center_bp=args.center_bp,
         top_n=args.top_n,
         output_prefix=args.output_prefix,
+        save_bp_signals=not args.no_save_bp_signals,
+        pseudocount=args.pseudocount,
     )
     run_dir = Path(args.run_dir)
     print(f"wrote: {run_dir / f'{args.output_prefix}_track_effects.tsv'} ({len(effects)} rows)")
     print(f"wrote: {run_dir / f'{args.output_prefix}_top{args.top_n}_tracks_by_site.tsv'}")
     print(f"wrote: {run_dir / f'{args.output_prefix}_track_effect_summary.tsv'}")
+    if not args.no_save_bp_signals:
+        print(f"wrote: {run_dir / f'{args.output_prefix}_ref_bp_signal.npy'}")
+        print(f"wrote: {run_dir / f'{args.output_prefix}_alt_bp_signal.npy'}")
+        print(f"wrote: {run_dir / f'{args.output_prefix}_raw_change_bp_signal.npy'}")
+        print(f"wrote: {run_dir / f'{args.output_prefix}_log2fc_bp_signal.npy'}")
+        print(f"wrote: {run_dir / f'{args.output_prefix}_bp_signal_coordinates.tsv'}")
     print("\nTop tracks:")
     view_cols = [
         "site_id",
@@ -210,10 +340,13 @@ def main() -> None:
         "output_type",
         "target",
         "biosample_name",
-        "delta_mean",
-        "delta_abs_mean",
-        "log1p_loss_mean",
-        "log1p_gain_mean",
+        "signed_log2_fold_change",
+        "log2_fold_change_magnitude",
+        "loss_log2_fold_change_magnitude",
+        "gain_log2_fold_change_magnitude",
+        "raw_signed_change",
+        "raw_change_magnitude",
+        "raw_max_change_magnitude",
     ]
     print(top[[col for col in view_cols if col in top.columns]].head(args.top_n).to_string(index=False))
     print("\nTop output/target summary:")

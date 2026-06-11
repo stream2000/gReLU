@@ -24,6 +24,7 @@ from grelu.interpret.tf_context import (
 )
 from scripts.ism.summarize_center_track_effects import (
     center_mask,
+    expand_center_bp_signals,
     summarize_center_track_effects,
 )
 
@@ -633,6 +634,35 @@ def test_summarize_center_track_effects_keeps_tracks_separate():
     assert effects.shape[0] == 2
     assert effects["site_id"].nunique() == 1
     assert effects["target"].tolist() == ["CTCF", "ATAC-seq"]
-    assert effects["delta_mean"].tolist() == pytest.approx([-1 / 3, 2 / 3])
-    assert effects["log1p_loss_mean"].iloc[0] > 0
-    assert effects["log1p_gain_mean"].iloc[1] > 0
+    assert effects["raw_signed_change"].tolist() == pytest.approx([-1 / 3, 2 / 3])
+    assert effects["raw_change_magnitude"].tolist() == pytest.approx([1 / 3, 2 / 3])
+    assert effects["loss_log2_fold_change_magnitude"].iloc[0] > 0
+    assert effects["gain_log2_fold_change_magnitude"].iloc[1] > 0
+
+
+def test_expand_center_bp_signals_uses_dense_bp_axis():
+    ref = np.array([[[10.0, 20.0, 30.0]]], dtype=np.float32)
+    alt = np.array([[[11.0, 18.0, 35.0]]], dtype=np.float32)
+    bins = pd.DataFrame(
+        {
+            "window_bin_index": [0, 1, 2],
+            "model_bin_index": [100, 101, 102],
+            "offset_bp": [-2, 0, 2],
+        }
+    )
+
+    signals, coords = expand_center_bp_signals(
+        ref,
+        alt,
+        window_bins=bins,
+        center_bp=4,
+        bin_size_bp=2,
+    )
+
+    assert coords["bp_offset"].tolist() == [-2, -1, 0, 1]
+    assert coords["source_window_bin_index"].tolist() == [0, 0, 1, 1]
+    assert signals["ref"].shape == (1, 1, 4)
+    assert signals["alt"].shape == (1, 1, 4)
+    assert signals["ref"][0, 0].tolist() == pytest.approx([10.0, 10.0, 20.0, 20.0])
+    assert signals["raw_change"][0, 0].tolist() == pytest.approx([1.0, 1.0, -2.0, -2.0])
+    assert signals["log2fc"].shape == (1, 1, 4)

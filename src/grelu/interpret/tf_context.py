@@ -395,18 +395,21 @@ def build_output_track_table(
 def build_alphagenome_model(
     output_key: str | Sequence[str] = DEFAULT_OUTPUT_KEYS,
     weights_path: str | Path | None = None,
+    resolution: int = AG_BIN_SIZE,
 ):
     """Build a gReLU LightningModel wrapping AlphaGenome selected heads."""
 
     from alphagenome_pytorch.config import DtypePolicy
     from grelu.lightning import LightningModel
 
+    if resolution not in (1, AG_BIN_SIZE):
+        raise ValueError(f"AlphaGenome output resolution must be 1 or {AG_BIN_SIZE}, got {resolution}")
     parsed_output_key = output_key if isinstance(output_key, str) else tuple(output_key)
     model_params = {
         "model_type": "AlphaGenomeModel",
         "output_key": parsed_output_key,
         "dtype_policy": DtypePolicy.mixed_precision(),
-        "resolution": AG_BIN_SIZE,
+        "resolution": resolution,
     }
     if weights_path is not None:
         model_params["weights_path"] = str(weights_path)
@@ -415,7 +418,7 @@ def build_alphagenome_model(
         model_params=model_params,
         train_params={"task": "regression", "loss": "mse"},
     )
-    model.data_params["train"] = {"seq_len": AG_INPUT_LEN, "bin_size": AG_BIN_SIZE}
+    model.data_params["train"] = {"seq_len": AG_INPUT_LEN, "bin_size": resolution}
     model.model_params["crop_len"] = 0
     return model
 

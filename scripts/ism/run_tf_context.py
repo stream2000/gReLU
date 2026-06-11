@@ -81,6 +81,13 @@ def main() -> None:
     parser.add_argument("--n_clusters", type=int, default=6)
     parser.add_argument("--output_keys", default="default", help="Comma-separated AG heads or 'default'")
     parser.add_argument(
+        "--output_resolution",
+        type=int,
+        choices=[1, 128],
+        default=128,
+        help="AlphaGenome 1D track output resolution in bp. ChIP heads only support 128.",
+    )
+    parser.add_argument(
         "--feature_mode",
         choices=["track_window", "grouped", "contact_boundary"],
         default="track_window",
@@ -147,7 +154,11 @@ def main() -> None:
 
     stage_t0 = time.perf_counter()
     model_output_key = "contact_maps" if args.feature_mode == "contact_boundary" else output_keys
-    model = build_alphagenome_model(output_key=model_output_key, weights_path=args.weights_path)
+    model = build_alphagenome_model(
+        output_key=model_output_key,
+        weights_path=args.weights_path,
+        resolution=args.output_resolution,
+    )
     timings["build_model_seconds"] = time.perf_counter() - stage_t0
     if args.compile:
         stage_t0 = time.perf_counter()
@@ -169,6 +180,7 @@ def main() -> None:
             num_workers=args.num_workers,
             precision=args.precision,
             window_bp=args.track_window_bp,
+            bin_size=args.output_resolution,
             save_delta_window=not args.no_save_delta_window,
             predict_chunk_size=args.track_predict_chunk_size,
             timing_records=chunk_timings,

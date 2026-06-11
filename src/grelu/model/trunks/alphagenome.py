@@ -72,11 +72,12 @@ class AlphaGenomeTrunk(nn.Module):
             self._multi_head = True
             self.output_key = tuple(output_key)
 
-        if self._multi_head and resolution != 128:
-            # chip_tf / chip_histone only exist at 128bp; mixing resolutions
-            # would yield mismatched length dims that cannot be concatenated.
+        chip_heads = {"chip_tf", "chip_histone"}
+        if resolution != 128 and any(k in chip_heads for k in self.output_keys):
+            # chip_tf / chip_histone only exist at 128bp; mixing them into a
+            # 1bp multi-head request would yield missing or mismatched outputs.
             raise ValueError(
-                f"Multi-head output requires resolution=128 (got {resolution}). "
+                f"Requested resolution={resolution} with ChIP head(s) {sorted(chip_heads & set(self.output_keys))}. "
                 f"Heads chip_tf and chip_histone are only available at 128bp."
             )
 
@@ -143,12 +144,12 @@ class AlphaGenomeTrunk(nn.Module):
         )
 
         # Restrict computed heads / resolutions for efficiency when possible.
-        # Only the standard track heads accept the `heads=` filter; for non-standard
-        # outputs (contact_maps, splicing) we let the model compute everything.
         forward_kwargs = dict(channels_last=False)
         if self._multi_head or self.output_key in self.model.heads:
             forward_kwargs["heads"] = tuple(self.output_keys)
             forward_kwargs["resolutions"] = (self.resolution,)
+        elif self.output_key == "contact_maps":
+            forward_kwargs["heads"] = ("contact_maps",)
 
         if self.training:
             # Use forward directly during training to keep gradients
