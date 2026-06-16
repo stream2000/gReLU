@@ -70,3 +70,6 @@ agent-doc/
 /scripts/eqtl/ref/
 /scripts/ism/docs/
 /scripts/ism/legacy/
+/data/
+/outputs/
+/.claude/
