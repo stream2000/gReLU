@@ -4,16 +4,18 @@
 
 | Script | Purpose | Status |
 |---|---|---|
+| `REVIEW.md` | Code-review note for CTCF motif edits and AG/Borzoi result reproduction | Current review entry |
 | `make_mreg_ctcf_example.py` | Legacy MVP: create a single CTCF motif perturbation near MREG TSS | Preserved |
 | `run_mreg_ctcf_mvp.sh` | Legacy MVP runner script | Preserved |
 | `run_tf_context_multires_center.py` | Legacy runner: multi-resolution centered track extraction | Preserved |
-| `plot_mreg_ctcf_multires_topology.py` | Legacy plot: topology views for multires output | Preserved |
+| `plot/plot_mreg_ctcf_multires_topology.py` | Legacy plot: topology views for multires output | Preserved |
 | `run_mreg_ctcf_contact_multiscale.py` | Legacy runner: contact-map multi-scale analysis | Preserved |
-| `plot_mreg_ctcf_contact_multiscale.py` | Legacy plot: contact-map views | Preserved |
+| `plot/plot_mreg_ctcf_contact_multiscale.py` | Legacy plot: contact-map views | Preserved |
 | **`prepare_mreg_three_region_pilot.py`** | Phase 0–1 manifest preparation and DIC-candidate validation | Fixed; DIC candidates still need review |
 | **`run_mreg_three_region_chromatin.py`** | Phase 2–3 AlphaGenome 128 bp ChIP inference | Coordinate-frame bug fixed; not rerun |
+| **`run_mreg_borzoi_profiles.py`** | Borzoi REF/ALT profiles for the same MREG experimental edits | Current Borzoi comparison |
 | **`analyze_mreg_three_region_chromatin.py`** | Phase 4 metrics and response matrices | Current legacy run restricted to TSS positive control |
-| **`plot_mreg_three_region_chromatin.py`** | Phase 4 visualization | Current legacy run emits TSS-only figure |
+| **`plot/plot_mreg_three_region_chromatin.py`** | Phase 4 visualization | Current legacy run emits TSS-only figure |
 
 ## New three-region pilot (2026-06-10)
 
@@ -68,7 +70,7 @@ python scripts/ism/examples/mreg/analyze_mreg_three_region_chromatin.py \
   --run-dir agent-doc/ism_context/20260610_1543_mreg_tss_hc_lc_dic_pilot/run \
   --output-dir agent-doc/ism_context/20260610_1543_mreg_tss_hc_lc_dic_pilot/analysis
 
-python scripts/ism/examples/mreg/plot_mreg_three_region_chromatin.py \
+python scripts/ism/examples/mreg/plot/plot_mreg_three_region_chromatin.py \
   --analysis-dir agent-doc/ism_context/20260610_1543_mreg_tss_hc_lc_dic_pilot/analysis \
   --run-dir agent-doc/ism_context/20260610_1543_mreg_tss_hc_lc_dic_pilot/run \
   --prepared-dir agent-doc/ism_context/20260610_1543_mreg_tss_hc_lc_dic_pilot/prepared \
@@ -131,7 +133,7 @@ agent-doc/ism_context/20260610_1543_mreg_tss_hc_lc_dic_pilot/
 ### Historical examples
 
 The older scripts (`make_mreg_ctcf_example.py`, `run_tf_context_multires_center.py`,
-`plot_mreg_ctcf_multires_topology.py`, and contact-map variants) are preserved for
+`plot/plot_mreg_ctcf_multires_topology.py`, and contact-map variants) are preserved for
 reference but are **outside** the current three-region pilot workflow. Their paths
 and output assumptions remain those of the original examples.
 
