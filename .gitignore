@@ -72,4 +72,8 @@ agent-doc/
 # Local replication artifacts
 /bigwig
 /dataset_store/
-/experiments/
+/experiments/*
+!/experiments/Progress.md
+!/experiments/RUNBOOK.md
+/runs/
+/referrence/

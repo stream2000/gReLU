@@ -60,8 +60,9 @@ scripts/eqtl/README.md
 
 ## Progress Notes
 
-Maintain a short `Progress.md` in this checkout. Update it after important
-usable results or branch-integration decisions.
+Maintain a short `experiments/Progress.md` in this checkout. Update it after
+important usable results or branch-integration decisions. The Borzoi fine-tuning
+runbook lives at `experiments/RUNBOOK.md`.
 
 Record:
 
