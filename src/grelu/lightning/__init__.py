@@ -322,8 +322,29 @@ class LightningModel(pl.LightningModule):
             on_step=True,
             on_epoch=True,
             prog_bar=True,
+            sync_dist=True,
         )
         return loss
+
+    def _freeze_embedding_training_state(self) -> None:
+        embedding = getattr(self.model, "embedding", None)
+        if embedding is None:
+            return
+        if self.train_params.get("freeze_embedding_eval", False):
+            embedding.eval()
+            return
+        if not self.train_params.get("freeze_embedding_norm_stats", False):
+            return
+        norm_types = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.SyncBatchNorm)
+        for module in embedding.modules():
+            if isinstance(module, norm_types):
+                module.eval()
+
+    def on_train_epoch_start(self) -> None:
+        self._freeze_embedding_training_state()
+
+    def on_train_batch_start(self, batch: Tensor, batch_idx: int) -> None:
+        self._freeze_embedding_training_state()
 
     def validation_step(self, batch: Tensor, batch_idx: int) -> Tensor:
         x, y = batch
@@ -336,6 +357,7 @@ class LightningModel(pl.LightningModule):
             logger=self.train_params["logger"] is not None,
             on_step=False,
             on_epoch=True,
+            sync_dist=True,
         )
         self.update_metrics(self.val_metrics, y_hat, y)
         self.val_losses.append(loss)
@@ -356,8 +378,8 @@ class LightningModel(pl.LightningModule):
             print(mean_val_metrics)
             print(f"validation loss: {mean_losses}")
         else:
-            self.log_dict(mean_val_metrics)
-            self.log("val_loss", mean_losses)
+            self.log_dict(mean_val_metrics, sync_dist=True)
+            self.log("val_loss", mean_losses, sync_dist=True)
 
         self.val_metrics.reset()
         self.val_losses = []
@@ -373,7 +395,14 @@ class LightningModel(pl.LightningModule):
         logits = self.forward(x, logits=True)
         loss = self.loss(logits, y)
         y_hat = self.activation(logits)
-        self.log("test_loss", loss, logger=True, on_step=False, on_epoch=True)
+        self.log(
+            "test_loss",
+            loss,
+            logger=True,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
         self.update_metrics(self.test_metrics, y_hat, y)
         self.test_losses.append(loss)
         return loss
@@ -383,9 +412,9 @@ class LightningModel(pl.LightningModule):
         Calculate metrics for entire test set
         """
         test_metrics = self.test_metrics.compute()
-        self.log_dict({k: v.mean() for k, v in test_metrics.items()})
+        self.log_dict({k: v.mean() for k, v in test_metrics.items()}, sync_dist=True)
         losses = torch.stack(self.test_losses)
-        self.log("test_loss", torch.mean(losses))
+        self.log("test_loss", torch.mean(losses), sync_dist=True)
 
         self.test_metrics.reset()
         self.test_losses = []
