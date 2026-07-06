@@ -73,7 +73,6 @@ agent-doc/
 /bigwig
 /dataset_store/
 /experiments/*
-!/experiments/Progress.md
-!/experiments/RUNBOOK.md
+/AGENTS.md
 /runs/
 /referrence/

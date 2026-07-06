@@ -136,6 +136,32 @@ CUDA_VISIBLE_DEVICES=0,1,3 python src/ft-scripts/train_borzoi.py \
   --checkpoint_path runs/borzoi_split_chr10_chr11_log1p_mse_lora/checkpoints/last.ckpt
 ```
 
+## Positive-Control Plots
+
+Generate the fixed positive-control validation layout with the original wet
+track PDF on the left and observed-vs-predicted LoRA overlay on the right:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python src/ft-scripts/plot_borzoi_positive_controls.py \
+  --checkpoint runs/borzoi_split_chr10_chr11_poisson_multinomial_lora/checkpoints/epochepoch=19.ckpt \
+  --out_dir experiments/validation/borzoi_lora_poisson_multinomial_epoch19_controls_raw_cpm
+```
+
+Main outputs:
+
+```text
+experiments/validation/<run>/per_track_metrics.csv
+experiments/validation/<run>/coordinate_qc.csv
+experiments/validation/<run>/positive_controls_observed_vs_lora_poisson_multinomial_contact_sheet.png
+experiments/validation/<run>/summary/positive_controls_original_left_lora_poisson_multinomial_overlay_right_contact_sheet.png
+experiments/validation/<run>/summary/positive_controls_original_left_lora_poisson_multinomial_overlay_right.pdf
+```
+
+The left panel uses the PDFs in `referrence/validation/`; the script shells out
+to system `pdftoppm` for first-page rendering. `coordinate_qc.csv` parses each
+PDF title with `pdftotext` and checks that the right-side overlay uses the same
+gene, transcript, strand, chromosome, start, and end.
+
 ## Notes
 
 - Labels are pre-aggregated to 32 bp bins before caching.

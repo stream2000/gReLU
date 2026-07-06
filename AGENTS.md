@@ -1,12 +1,15 @@
 # gReLU Replication Agent Guide
 
-Last updated: 2026-06-25.
+Last updated: 2026-06-29.
 
-This checkout is the user's fork cloned at:
+This checkout is the user's fork. The active shared checkout lives at:
 
 ```text
-/home/fqijun/python/gReLU-replication
+/work2/Users/qijun/gReLU-replication
 ```
+
+`/home/fqijun/python/gReLU-replication` is expected to be a symlink to that
+shared path on configured hosts.
 
 It is currently on the `alphagenome` branch. This branch contains the
 AlphaGenome integration code, including:
@@ -23,19 +26,39 @@ example runners exist in this checkout until that merge/cherry-pick is done.
 
 ## Environment
 
-Use the same conda environment as the original local checkout:
+Code and environment are intentionally separate concerns. Prefer the shared
+checkout path for code, but choose the conda environment per host and workload.
+Shared conda environments can be slow for Python startup/import because imports
+touch many small package and metadata files on shared storage.
+
+Default interactive setup:
 
 ```bash
-cd /home/fqijun/python/gReLU-replication
+cd /work2/Users/qijun/gReLU-replication
 source activate.sh
 ```
 
-`activate.sh` activates `grelu_dev` and prepends this checkout's `src/` to
-`PYTHONPATH`, so Python imports should resolve to:
+`activate.sh` activates a known working environment and prepends this checkout's
+`src/` to `PYTHONPATH`, so Python imports should resolve to:
 
 ```text
-/home/fqijun/python/gReLU-replication/src/grelu
+/work2/Users/qijun/gReLU-replication/src/grelu
 ```
+
+For long training runs or plotting scripts on hosts where the shared env starts
+slowly, it is acceptable and often preferable to use the host-local env while
+keeping the shared repo on `PYTHONPATH`:
+
+```bash
+cd /work2/Users/qijun/gReLU-replication
+source /work/miniconda3/etc/profile.d/conda.sh
+conda activate grelu_dev
+export PYTHONPATH=/work2/Users/qijun/gReLU-replication/src:${PYTHONPATH:-}
+```
+
+Do not assume the shared `/work/gReLU/env` is always the best runtime just
+because the source checkout is shared. Verify `import grelu; print(grelu.__file__)`
+when switching hosts or shells.
 
 ## Basic Checks
 
