@@ -165,6 +165,11 @@ class BorzoiMmapSeqDataset(LabeledSeqDataset):
         augment_mode: str = "serial",
     ) -> None:
         self.intervals = intervals.reset_index(drop=True)
+        self.sequence_intervals = resize(
+            self.intervals,
+            seq_len=seq_len,
+            input_type="intervals",
+        ).reset_index(drop=True)
         self.labels_path = Path(labels_path)
         self.genome_file = genome
         self.seq_len = seq_len
@@ -219,7 +224,7 @@ class BorzoiMmapSeqDataset(LabeledSeqDataset):
         return self.n_seqs * self.n_augmented
 
     def _sequence_indices(self, seq_idx: int) -> np.ndarray:
-        row = self.intervals.iloc[seq_idx]
+        row = self.sequence_intervals.iloc[seq_idx]
         seq_record = self.genome.get_seq(row["chrom"], int(row["start"]) + 1, int(row["end"]))
         seq = getattr(seq_record, "seq", str(seq_record)).upper()
         if len(seq) != self.seq_len:

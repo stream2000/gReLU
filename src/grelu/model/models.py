@@ -18,6 +18,7 @@ from torch import Tensor, nn
 
 from grelu.model.heads import ConvHead, MLPHead
 from grelu.model.trunks import (
+    AlphaGenomeFeatureTrunk,
     AlphaGenomeTrunk,
     ConvGRUTrunk,
     ConvTransformerTrunk,
@@ -839,4 +840,32 @@ class AlphaGenomeModel(BaseModel):
         embedding = AlphaGenomeTrunk(**kwargs)
         head = nn.Identity()
         head.n_tasks = embedding.out_channels
+        super().__init__(embedding, head)
+
+
+class AlphaGenomeFinetuneModel(BaseModel):
+    """
+    AlphaGenome model with a new gReLU ConvHead for downstream track fine-tuning.
+
+    The AlphaGenome trunk returns sequence embeddings at the requested
+    resolution, and the head maps those embeddings to ``n_tasks`` custom tracks.
+    """
+
+    def __init__(
+        self,
+        n_tasks: int,
+        resolution: int = 128,
+        final_pool_func: Optional[str] = None,
+        dtype=None,
+        device=None,
+        **kwargs,
+    ):
+        embedding = AlphaGenomeFeatureTrunk(resolution=resolution, **kwargs)
+        head = ConvHead(
+            n_tasks=n_tasks,
+            in_channels=embedding.out_channels,
+            pool_func=final_pool_func,
+            dtype=dtype,
+            device=device,
+        )
         super().__init__(embedding, head)

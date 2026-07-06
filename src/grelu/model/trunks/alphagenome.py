@@ -181,3 +181,64 @@ class AlphaGenomeTrunk(nn.Module):
         # But for standard tracks, it's (B, T, S).
 
         return out
+
+
+class AlphaGenomeFeatureTrunk(nn.Module):
+    """AlphaGenome embedding trunk for downstream fine-tuning heads.
+
+    This wrapper exposes AlphaGenome sequence embeddings instead of pretrained
+    assay predictions so gReLU can attach a normal trainable head. The output is
+    always NCL format: ``(batch, channels, bins)``.
+    """
+
+    def __init__(
+        self,
+        num_organisms: int = 2,
+        organism_index: int = 1,
+        resolution: int = 128,
+        dtype_policy: Optional[DtypePolicy] = None,
+        weights_path: Optional[str] = None,
+        gradient_checkpointing: bool = False,
+        **kwargs
+    ):
+        super().__init__()
+        if resolution not in {1, 128}:
+            raise ValueError(f"AlphaGenome feature resolution must be 1 or 128, got {resolution}")
+
+        self.organism_index = organism_index
+        self.resolution = resolution
+        self.out_channels = 1536 if resolution == 1 else 3072
+
+        if weights_path:
+            self.model = AlphaGenome.from_pretrained(
+                weights_path,
+                dtype_policy=dtype_policy,
+                num_organisms=num_organisms,
+                gradient_checkpointing=gradient_checkpointing,
+                **kwargs
+            )
+        else:
+            self.model = AlphaGenome(
+                num_organisms=num_organisms,
+                dtype_policy=dtype_policy,
+                gradient_checkpointing=gradient_checkpointing,
+                **kwargs
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # gReLU uses (N, 4, L), AlphaGenome expects (N, L, 4).
+        x = x.transpose(1, 2)
+        organism_index = torch.full(
+            (x.shape[0],),
+            self.organism_index,
+            dtype=torch.long,
+            device=x.device,
+        )
+
+        outputs = self.model.encode(
+            x,
+            organism_index,
+            resolutions=(self.resolution,),
+            channels_last=False,
+        )
+        return outputs[f"embeddings_{self.resolution}bp"]
