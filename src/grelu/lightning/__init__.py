@@ -671,6 +671,7 @@ class LightningModel(pl.LightningModule):
             default_root_dir=self.train_params["save_dir"],
             gradient_clip_val=self.train_params["clip"],
             accumulate_grad_batches=self.train_params["accumulate_grad_batches"],
+            precision=self.train_params.get("precision", None),
         )
 
         # Make dataloaders

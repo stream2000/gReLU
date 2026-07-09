@@ -84,6 +84,46 @@ def cache_path(cache_dir: Path, split_name: str, target_mode: TargetMode, bin_si
     return cache_dir / f"{split_name}__{target_mode}__bin{bin_size}"
 
 
+def sized_cache_path(
+    cache_dir: Path,
+    split_name: str,
+    target_mode: TargetMode,
+    seq_len: int,
+    label_len: int,
+    bin_size: int,
+) -> Path:
+    return cache_dir / f"{split_name}__{target_mode}__seq{seq_len}__label{label_len}__bin{bin_size}"
+
+
+def manifest_matches(
+    manifest_path: Path,
+    split_name: str,
+    target_mode: TargetMode,
+    genome: str,
+    seq_len: int,
+    label_len: int,
+    bin_size: int,
+    bw_files: list[str],
+    task_names: list[str],
+) -> bool:
+    if not manifest_path.exists():
+        return False
+    with manifest_path.open() as handle:
+        manifest = json.load(handle)
+    expected = {
+        "split_name": split_name,
+        "target_mode": target_mode,
+        "genome": genome,
+        "seq_len": seq_len,
+        "label_len": label_len,
+        "bin_size": bin_size,
+        "n_bins": label_len // bin_size,
+        "bw_files": bw_files,
+        "task_names": task_names,
+    }
+    return all(manifest.get(key) == value for key, value in expected.items())
+
+
 def ensure_borzoi_mmap_cache(
     split_name: str,
     target_mode: TargetMode,
@@ -106,7 +146,29 @@ def ensure_borzoi_mmap_cache(
     if not split_path.exists():
         raise FileNotFoundError(f"Split not found: {split_path}")
 
-    out_dir = cache_path(cache_dir, split_name, target_mode, bin_size)
+    legacy_dir = cache_path(cache_dir, split_name, target_mode, bin_size)
+    legacy_manifest = legacy_dir / "manifest.json"
+    if not force_rebuild and manifest_matches(
+        legacy_manifest,
+        split_name=split_name,
+        target_mode=target_mode,
+        genome=genome,
+        seq_len=seq_len,
+        label_len=label_len,
+        bin_size=bin_size,
+        bw_files=bw_files,
+        task_names=task_names,
+    ):
+        out_dir = legacy_dir
+    else:
+        out_dir = sized_cache_path(
+            cache_dir,
+            split_name=split_name,
+            target_mode=target_mode,
+            seq_len=seq_len,
+            label_len=label_len,
+            bin_size=bin_size,
+        )
     train_labels = out_dir / "train_labels.npy"
     val_labels = out_dir / "val_labels.npy"
     manifest = out_dir / "manifest.json"

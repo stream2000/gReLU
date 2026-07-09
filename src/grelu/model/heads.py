@@ -74,6 +74,88 @@ class ConvHead(nn.Module):
         return x
 
 
+class AlphaGenomeFinetuneHead(nn.Module):
+    """Track head for AlphaGenome embeddings with crop and bin aggregation.
+
+    AlphaGenome can expose either 128 bp or 1 bp sequence embeddings. This head
+    crops the embedding axis to the supervised label window and optionally
+    aggregates finer-resolution embeddings to the target bin size.
+    """
+
+    def __init__(
+        self,
+        n_tasks: int,
+        in_channels: int,
+        resolution: int,
+        label_len: int,
+        bin_size: int,
+        hidden_channels: int = 512,
+        hidden_layers: int = 1,
+        dropout: float = 0.0,
+        norm: bool = True,
+        dtype=None,
+        device=None,
+    ) -> None:
+        super().__init__()
+        if resolution not in {1, 128}:
+            raise ValueError(f"resolution must be 1 or 128, got {resolution}")
+        if label_len % resolution != 0:
+            raise ValueError("label_len must be divisible by resolution")
+        if bin_size % resolution != 0:
+            raise ValueError("bin_size must be divisible by resolution")
+        if label_len % bin_size != 0:
+            raise ValueError("label_len must be divisible by bin_size")
+
+        self.n_tasks = n_tasks
+        self.in_channels = in_channels
+        self.resolution = resolution
+        self.label_len = label_len
+        self.bin_size = bin_size
+        self.crop_bins = label_len // resolution
+        self.pool_bins = bin_size // resolution
+
+        layers = []
+        channels = in_channels
+        for _ in range(hidden_layers):
+            layers.append(
+                nn.Conv1d(
+                    channels,
+                    hidden_channels,
+                    kernel_size=1,
+                    dtype=dtype,
+                    device=device,
+                )
+            )
+            if norm:
+                layers.append(nn.GroupNorm(1, hidden_channels, dtype=dtype, device=device))
+            layers.append(nn.GELU())
+            if dropout:
+                layers.append(nn.Dropout(dropout))
+            channels = hidden_channels
+
+        layers.append(
+            nn.Conv1d(
+                channels,
+                n_tasks,
+                kernel_size=self.pool_bins,
+                stride=self.pool_bins,
+                dtype=dtype,
+                device=device,
+            )
+        )
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1] < self.crop_bins:
+            raise ValueError(
+                f"Embedding length {x.shape[-1]} is shorter than requested "
+                f"label crop {self.crop_bins}"
+            )
+        crop_start = (x.shape[-1] - self.crop_bins) // 2
+        x = x[..., crop_start : crop_start + self.crop_bins]
+        return self.net(x)
+
+
 class MLPHead(nn.Module):
     """
     This block implements the multi-layer perceptron (MLP) module.

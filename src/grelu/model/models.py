@@ -16,7 +16,7 @@ from typing import List, Optional, Union
 import torch
 from torch import Tensor, nn
 
-from grelu.model.heads import ConvHead, MLPHead
+from grelu.model.heads import AlphaGenomeFinetuneHead, ConvHead, MLPHead
 from grelu.model.trunks import (
     AlphaGenomeFeatureTrunk,
     AlphaGenomeTrunk,
@@ -855,17 +855,38 @@ class AlphaGenomeFinetuneModel(BaseModel):
         self,
         n_tasks: int,
         resolution: int = 128,
+        label_len: Optional[int] = None,
+        bin_size: Optional[int] = None,
+        head_hidden_channels: int = 0,
+        head_hidden_layers: int = 0,
+        head_dropout: float = 0.0,
+        head_norm: bool = True,
         final_pool_func: Optional[str] = None,
         dtype=None,
         device=None,
         **kwargs,
     ):
         embedding = AlphaGenomeFeatureTrunk(resolution=resolution, **kwargs)
-        head = ConvHead(
-            n_tasks=n_tasks,
-            in_channels=embedding.out_channels,
-            pool_func=final_pool_func,
-            dtype=dtype,
-            device=device,
-        )
+        if label_len is None or bin_size is None:
+            head = ConvHead(
+                n_tasks=n_tasks,
+                in_channels=embedding.out_channels,
+                pool_func=final_pool_func,
+                dtype=dtype,
+                device=device,
+            )
+        else:
+            head = AlphaGenomeFinetuneHead(
+                n_tasks=n_tasks,
+                in_channels=embedding.out_channels,
+                resolution=resolution,
+                label_len=label_len,
+                bin_size=bin_size,
+                hidden_channels=head_hidden_channels,
+                hidden_layers=head_hidden_layers,
+                dropout=head_dropout,
+                norm=head_norm,
+                dtype=dtype,
+                device=device,
+            )
         super().__init__(embedding, head)
