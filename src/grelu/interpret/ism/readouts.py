@@ -63,20 +63,33 @@ def summarize_profile_pair(
 
     import numpy as np
 
-    ref_arr = np.maximum(np.asarray(ref, dtype=float), 0.0)
-    alt_arr = np.maximum(np.asarray(alt, dtype=float), 0.0)
+    ref_raw = np.asarray(ref, dtype=float)
+    alt_raw = np.asarray(alt, dtype=float)
+    ref_arr = np.maximum(ref_raw, 0.0)
+    alt_arr = np.maximum(alt_raw, 0.0)
     delta = alt_arr - ref_arr
     log2fc = np.log2((alt_arr + pseudocount) / (ref_arr + pseudocount))
+    ref_sum = float(ref_arr.sum())
+    alt_sum = float(alt_arr.sum())
+    sum_pseudocount = float(pseudocount) * max(int(ref_arr.size), 1)
     peak_ref = int(np.argmax(ref_arr)) if ref_arr.size else -1
     peak_alt = int(np.argmax(alt_arr)) if alt_arr.size else -1
     return {
         "n_bins": int(ref_arr.size),
         "ref_mean": float(ref_arr.mean()),
         "alt_mean": float(alt_arr.mean()),
+        "ref_sum": ref_sum,
+        "alt_sum": alt_sum,
         "signed_delta_mean": float(delta.mean()),
+        "signed_delta_sum": float(delta.sum()),
         "absolute_delta_mean": float(np.abs(delta).mean()),
         "log2fc_mean": float(log2fc.mean()),
+        "log2fc_ratio_of_sums": float(
+            np.log2((alt_sum + sum_pseudocount) / (ref_sum + sum_pseudocount))
+        ),
         "absolute_log2fc_mean": float(np.abs(log2fc).mean()),
+        "ref_negative_bins": int(np.sum(ref_raw < 0)),
+        "alt_negative_bins": int(np.sum(alt_raw < 0)),
         "delta_peak": float(np.max(np.abs(delta))),
         "ref_peak_bin": peak_ref,
         "alt_peak_bin": peak_alt,

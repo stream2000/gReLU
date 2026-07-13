@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from .base import TrackSpec
+from .utils import sequences_to_tensor, track_indices
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
 FT_SCRIPT_DIR = REPO_ROOT / "src" / "ft-scripts"
@@ -19,24 +20,6 @@ if str(FT_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(FT_SCRIPT_DIR))
 
 TASK_NAMES = ["hsc", "mac", "lsec", "chol"]
-
-
-def _sequence_to_tensor(sequence: str) -> torch.Tensor:
-    from grelu.sequence.format import BASE_TO_INDEX_HASH, indices_to_one_hot
-
-    seq = str(sequence).upper()
-    n_index = BASE_TO_INDEX_HASH["N"]
-    indices = np.fromiter(
-        (BASE_TO_INDEX_HASH.get(base, n_index) for base in seq),
-        dtype=np.int8,
-        count=len(seq),
-    )
-    one_hot = indices_to_one_hot(indices)
-    if one_hot.shape[0] != 4 and one_hot.shape[-1] == 4:
-        one_hot = one_hot.T
-    if one_hot.shape[0] != 4:
-        raise ValueError(f"Expected channel-first one-hot sequence, got {tuple(one_hot.shape)}")
-    return one_hot.contiguous()
 
 
 class AlphaGenomeFinetunedAdapter:
@@ -145,6 +128,8 @@ class AlphaGenomeFinetunedAdapter:
                 modality="10x_scRNAseq_3prime_pseudobulk",
                 resolution_bp=self.output_resolution_bp,
                 source="alphagenome_finetuned",
+                group=f"{task}_finetuned_10x",
+                description=f"Saijou {task} 10X scRNA-seq pseudobulk",
             )
             for index, task in enumerate(TASK_NAMES)
         ]
@@ -186,28 +171,12 @@ class AlphaGenomeFinetunedAdapter:
     ) -> np.ndarray:
         if self._model is None:
             raise RuntimeError("AlphaGenomeFinetunedAdapter.setup() has not been called")
-        if not sequences:
-            raise ValueError("No sequences provided for prediction")
-        tensors = []
-        for seq in sequences:
-            if len(seq) != self.input_length_bp:
-                raise ValueError(
-                    f"Expected {self.input_length_bp} bp sequence, got {len(seq)}"
-                )
-            tensors.append(_sequence_to_tensor(seq))
-        x = torch.stack(tensors, dim=0).to(self._device)
+        x = sequences_to_tensor(
+            sequences, expected_length=self.input_length_bp
+        ).to(self._device)
         with torch.no_grad():
             pred = self._model.forward(x).detach().cpu().numpy().astype(np.float32)
         if pred.ndim != 3:
             raise RuntimeError(f"Unexpected prediction shape: {pred.shape}")
-        indices = self._track_indices(tracks)
+        indices = track_indices(self.track_specs, tracks)
         return pred[:, indices, :]
-
-    def _track_indices(self, tracks: Sequence[str] | None) -> list[int]:
-        if tracks is None:
-            return list(range(len(self.track_specs)))
-        by_name = {spec.track_id: spec.channel_index for spec in self.track_specs}
-        missing = [track for track in tracks if track not in by_name]
-        if missing:
-            raise ValueError(f"Unknown tracks requested: {missing}")
-        return [by_name[track] for track in tracks]

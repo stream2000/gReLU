@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import random
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -78,6 +80,181 @@ def enumerate_snv_site_table(*, fasta, windows: Iterable[SaturationWindow]) -> p
     """Expand all windows into one mutation manifest."""
 
     tables = [enumerate_snv_sites(fasta=fasta, window=window) for window in windows]
+    if not tables:
+        return pd.DataFrame()
+    table = pd.concat(tables, ignore_index=True)
+    if table["mutation_id"].duplicated().any():
+        examples = table.loc[table["mutation_id"].duplicated(), "mutation_id"].head().tolist()
+        raise ValueError(f"Duplicate mutation_id values: {examples}")
+    return table
+
+
+def _rng_for(*, seed: int, mutation_key: str) -> random.Random:
+    digest = hashlib.sha256(f"{seed}:{mutation_key}".encode()).digest()
+    return random.Random(int.from_bytes(digest[:8], byteorder="big", signed=False))
+
+
+def _random_sequence(length: int, rng: random.Random) -> str:
+    return "".join(rng.choice(BASES) for _ in range(length))
+
+
+def _force_difference(ref: str, alt: str, rng: random.Random) -> str:
+    if alt != ref:
+        return alt
+    if not ref:
+        return alt
+    idx = rng.randrange(len(ref))
+    choices = [base for base in BASES if base != ref[idx]]
+    return alt[:idx] + rng.choice(choices) + alt[idx + 1 :]
+
+
+def replacement_sequence(ref: str, *, mode: str, seed: int, mutation_key: str) -> str:
+    """Create a deterministic same-length background replacement sequence."""
+
+    ref = ref.upper()
+    if any(base not in BASES for base in ref):
+        raise ValueError(f"Replacement windows must be ACGT-only, got {ref}")
+    rng = _rng_for(seed=seed, mutation_key=mutation_key)
+    if mode == "random":
+        alt = _random_sequence(len(ref), rng)
+    elif mode == "shuffle":
+        chars = list(ref)
+        rng.shuffle(chars)
+        alt = "".join(chars)
+    else:
+        raise ValueError(f"Unknown replacement mode: {mode}")
+    return _force_difference(ref, alt, rng)
+
+
+def strict_unique_shuffles(
+    ref: str, *, n: int, seed: int, mutation_key: str
+) -> list[str]:
+    """Return deterministic unique shuffles that preserve base composition."""
+
+    ref = ref.upper()
+    if len(set(ref)) < 2:
+        raise ValueError(
+            "Cannot create a different composition-preserving shuffle for "
+            f"{mutation_key}: {ref}"
+        )
+    rng = _rng_for(seed=seed, mutation_key=mutation_key)
+    seen = {ref}
+    values = []
+    for _ in range(100_000):
+        chars = list(ref)
+        rng.shuffle(chars)
+        alternate = "".join(chars)
+        if alternate in seen:
+            continue
+        seen.add(alternate)
+        values.append(alternate)
+        if len(values) == int(n):
+            return values
+    raise RuntimeError(
+        f"Could not generate {n} unique shuffles for {mutation_key}: {ref}"
+    )
+
+
+def enumerate_sliding_window_replacements(
+    *,
+    fasta,
+    window: SaturationWindow,
+    span_bp: int,
+    stride_bp: int = 1,
+    mode: str = "shuffle",
+    replicates: int = 1,
+    seed: int = 1,
+) -> pd.DataFrame:
+    """Return one manifest row per same-length sliding-window replacement."""
+
+    start = int(window.start)
+    end = int(window.end)
+    span_bp = int(span_bp)
+    stride_bp = int(stride_bp)
+    replicates = int(replicates)
+    if end <= start:
+        raise ValueError(f"Invalid saturation window: {window.chrom}:{start}-{end}")
+    if span_bp <= 0:
+        raise ValueError(f"span_bp must be positive, got {span_bp}")
+    if stride_bp <= 0:
+        raise ValueError(f"stride_bp must be positive, got {stride_bp}")
+    if replicates <= 0:
+        raise ValueError(f"replicates must be positive, got {replicates}")
+    if span_bp > end - start:
+        raise ValueError(f"span_bp {span_bp} is larger than window length {end - start}")
+
+    sequence = fasta.extract(window.chrom, start, end).upper()
+    rows: list[dict] = []
+    token = _slug(window.window_id)
+    for offset in range(0, len(sequence) - span_bp + 1, stride_bp):
+        edit_start = start + offset
+        edit_end = edit_start + span_bp
+        ref = sequence[offset : offset + span_bp]
+        if any(base not in BASES for base in ref):
+            continue
+        center = edit_start + span_bp // 2
+        for replicate in range(replicates):
+            mutation_key = f"{token}:{mode}:{span_bp}:{edit_start}:{edit_end}:{replicate}"
+            alt = replacement_sequence(ref, mode=mode, seed=seed, mutation_key=mutation_key)
+            mutation_id = (
+                f"{token}__window_{span_bp}bp_{mode}_{edit_start}_{edit_end}"
+                f"__rep{replicate}"
+            )
+            rows.append(
+                {
+                    "mutation_id": mutation_id,
+                    "window_id": window.window_id,
+                    "gene": window.gene,
+                    "chrom": window.chrom,
+                    "anchor": int(window.anchor),
+                    "edit_start": edit_start,
+                    "edit_end": edit_end,
+                    "edit_center_position": center,
+                    "edit_length_bp": span_bp,
+                    "ref_sequence": ref,
+                    "alt_sequence": alt,
+                    "mutation_kind": "sliding_window_replacement",
+                    "replacement_mode": mode,
+                    "replacement_replicate": replicate,
+                    "control_type": "experimental",
+                    "matched_target_id": mutation_id,
+                    "variant_position": center,
+                    "ref_base": ref,
+                    "alt_base": alt,
+                    "variant_id": f"{window.chrom}:{edit_start}-{edit_end}:{ref}>{alt}",
+                    "saturation_start": start,
+                    "saturation_end": end,
+                    "source": window.source,
+                    "label": window.label or window.window_id,
+                }
+            )
+    return pd.DataFrame.from_records(rows)
+
+
+def enumerate_sliding_window_replacement_table(
+    *,
+    fasta,
+    windows: Iterable[SaturationWindow],
+    span_bp: int,
+    stride_bp: int = 1,
+    mode: str = "shuffle",
+    replicates: int = 1,
+    seed: int = 1,
+) -> pd.DataFrame:
+    """Expand all windows into one sliding-window replacement manifest."""
+
+    tables = [
+        enumerate_sliding_window_replacements(
+            fasta=fasta,
+            window=window,
+            span_bp=span_bp,
+            stride_bp=stride_bp,
+            mode=mode,
+            replicates=replicates,
+            seed=seed,
+        )
+        for window in windows
+    ]
     if not tables:
         return pd.DataFrame()
     table = pd.concat(tables, ignore_index=True)

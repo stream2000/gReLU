@@ -4,7 +4,9 @@ import pytest
 from grelu.interpret.ism.mutations import (
     SaturationWindow,
     apply_equal_length_edit,
+    enumerate_sliding_window_replacement_table,
     enumerate_snv_site_table,
+    strict_unique_shuffles,
 )
 from grelu.interpret.ism.readouts import map_readouts_to_bins, summarize_profile_pair
 
@@ -56,6 +58,68 @@ def test_apply_equal_length_edit_validates_reference_base():
         apply_equal_length_edit("AACG", 0, bad)
 
 
+def test_strict_unique_shuffles_are_deterministic_and_composition_preserving():
+    first = strict_unique_shuffles(
+        "AACCGGTT", n=3, seed=23, mutation_key="candidate"
+    )
+    repeat = strict_unique_shuffles(
+        "AACCGGTT", n=3, seed=23, mutation_key="candidate"
+    )
+    assert first == repeat
+    assert len(set(first)) == 3
+    assert "AACCGGTT" not in first
+    assert all(sorted(value) == sorted("AACCGGTT") for value in first)
+
+    with pytest.raises(ValueError, match="composition-preserving"):
+        strict_unique_shuffles("AAAA", n=1, seed=23, mutation_key="homopolymer")
+
+
+def test_enumerate_sliding_window_replacements_are_deterministic_equal_length_edits():
+    fasta = FakeFasta({"chr1": "AACGTN"})
+    windows = [
+        SaturationWindow(
+            window_id="demo",
+            chrom="chr1",
+            start=0,
+            end=5,
+            anchor=2,
+            gene="GeneA",
+        )
+    ]
+
+    table = enumerate_sliding_window_replacement_table(
+        fasta=fasta,
+        windows=windows,
+        span_bp=3,
+        stride_bp=1,
+        mode="random",
+        replicates=2,
+        seed=7,
+    )
+    repeat = enumerate_sliding_window_replacement_table(
+        fasta=fasta,
+        windows=windows,
+        span_bp=3,
+        stride_bp=1,
+        mode="random",
+        replicates=2,
+        seed=7,
+    )
+
+    assert len(table) == 6
+    assert table["mutation_id"].is_unique
+    assert table["alt_sequence"].tolist() == repeat["alt_sequence"].tolist()
+    assert (table["edit_end"] - table["edit_start"]).eq(3).all()
+    assert table["ref_sequence"].str.len().eq(table["alt_sequence"].str.len()).all()
+    assert not (table["ref_sequence"] == table["alt_sequence"]).any()
+
+    edited = apply_equal_length_edit("AACGTN", 0, table.iloc[0])
+    assert len(edited) == len("AACGTN")
+    assert edited[table.iloc[0]["edit_start"] : table.iloc[0]["edit_end"]] == table.iloc[0][
+        "alt_sequence"
+    ]
+
+
 def test_map_readouts_to_bins_and_summarize_profile_pair():
     readouts = pd.DataFrame(
         [
@@ -80,4 +144,10 @@ def test_map_readouts_to_bins_and_summarize_profile_pair():
     summary = summarize_profile_pair([1.0, 3.0], [2.0, 1.0])
     assert summary["n_bins"] == 2
     assert summary["signed_delta_mean"] == pytest.approx(-0.5)
+    assert summary["signed_delta_sum"] == pytest.approx(-1.0)
+    assert summary["ref_sum"] == pytest.approx(4.0)
+    assert summary["alt_sum"] == pytest.approx(3.0)
+    assert summary["log2fc_ratio_of_sums"] == pytest.approx(
+        __import__("math").log2((3.0 + 2.0) / (4.0 + 2.0))
+    )
     assert summary["absolute_delta_mean"] == pytest.approx(1.5)

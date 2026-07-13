@@ -331,4 +331,3 @@ class TestMultiGPUConsistency:
 
         assert np.all(np.isfinite(preds)), "Multi-GPU predictions contain NaN or Inf"
 
-

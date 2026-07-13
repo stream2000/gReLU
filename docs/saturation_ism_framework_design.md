@@ -135,13 +135,55 @@ problems are architectural, not just naming problems.
    both mutation resolution and output-bin resolution into manifests and output
    tables.
 
-6. Reverse-complement behavior is model/track-specific
+6. TSS-relative coordinates must be strand-aware
+
+   Reporting `variant_position - tss` is a genomic-coordinate offset, not a
+   transcriptional offset. For negative-strand genes such as `Mdk` and `Acta2`,
+   smaller genomic coordinates are downstream from the TSS. Output tables should
+   therefore record both `variant_offset_from_tss_genomic_bp` and
+   `variant_offset_from_tss_transcription_bp`; biological summaries should use
+   the transcriptional offset when saying upstream/downstream.
+
+   Gene-level boundaries are not always the biologically relevant promoter.
+   `Acta2`, for example, has an alternative annotated transcript whose proximal
+   CArG sites are outside a 1 kb window around the gene-level TSS. Experiment
+   manifests should record the selected transcript/TSS source, and runners
+   should support an explicit transcript TSS without changing the gene body or
+   TES definition.
+
+   The mutation window must also be separable from the readout anchors. A known
+   first-intron element can be mutated at a strand-aware offset from the selected
+   TSS while effects are still summarized at TSS, TES/observed peak, and gene
+   body readouts.
+
+7. Readout-scale effects are not directly comparable
+
+   The current summary log2FC uses a fixed pseudocount on CPM-scale profiles.
+   It is useful for ranking variants within one gene/readout, but cross-gene or
+   cross-readout comparisons are confounded by baseline signal level. Stronger
+   claims should use readout-specific null distributions, percentiles, or
+   z-scores, and should report baseline REF signal alongside delta/log2FC.
+
+8. 10X readouts are not independent across TES and observed peak
+
+   Saijou HSC labels come from 10X scRNA-seq, where reads are concentrated near
+   transcript 3-prime ends. For many genes the observed HSC peak and the TES
+   readout will overlap or sample the same 3-prime signal source. These should
+   be treated as one 3-prime evidence class rather than independent validation
+   readouts unless their intervals are demonstrably separate.
+
+   For this experiment, TES/observed-peak effects are the primary evidence that
+   a TSS-region mutation changes the learned HSC expression output. Gene-body
+   summaries are secondary and length-dependent; TSS-local output is a useful
+   diagnostic but is not a substitute for the 3-prime expression evidence.
+
+9. Reverse-complement behavior is model/track-specific
 
    Original model stranded tracks may need reverse-complement partner mapping.
    Fine-tuned four-track HSC/mac/LSEC/chol outputs are not stranded output pairs
    in the same sense. This must live in the model adapter or track selector.
 
-7. Experiment scripts are too close to reusable logic
+10. Experiment scripts are too close to reusable logic
 
    Old MREG scripts contain valuable reusable code, but some files still mix
    MREG constants, track registry, ranking presets, and profile execution. This
@@ -258,6 +300,15 @@ class MutationGenerator(Protocol):
 Initial implementations:
 
 - `SaturationSnvGenerator`
+- `SlidingWindowReplacementGenerator`
+
+  This generator should create same-length edits with configurable
+  `span_bp`, `stride_bp`, replacement mode, seed, and replicate count. It is
+  useful when single-base ISM underestimates regulatory effects because motifs
+  are degenerate, several weak sites are redundant, or local sequence grammar
+  rather than one base is the functional unit. For `span_bp=1`, SNV saturation
+  remains the default fine-mapping mode; for `span_bp>1`, the output should be
+  interpreted as segment necessity rather than allelic effect.
   - port from old `saturation.py`.
   - enumerates every non-reference SNV in each window.
   - mandatory FASTA REF validation.

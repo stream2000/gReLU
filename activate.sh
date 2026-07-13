@@ -32,7 +32,12 @@ fi
 
 # Prefer this checkout's source tree while reusing the shared conda env.
 _GRELU_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PYTHONPATH="${_GRELU_ROOT}/src:${PYTHONPATH:-}"
+_ALPHAGENOME_SRC="${_GRELU_ROOT}/src/alphagenome_pytorch/src"
+if [[ -d "$_ALPHAGENOME_SRC" ]]; then
+    export PYTHONPATH="${_GRELU_ROOT}/src:${_ALPHAGENOME_SRC}:${PYTHONPATH:-}"
+else
+    export PYTHONPATH="${_GRELU_ROOT}/src:${PYTHONPATH:-}"
+fi
 
 # CUDA library fix: pip-installed nvidia packages need to take precedence over
 # system /usr/local/cuda/lib64, whose libnvJitLink.so.12 may be too old.
@@ -42,6 +47,6 @@ if [[ -d "$_NVIDIA_LIB_ROOT" ]]; then
         [[ -d "$_d" ]] && export LD_LIBRARY_PATH="${_d}:${LD_LIBRARY_PATH:-}"
     done
 fi
-unset _d _NVIDIA_LIB_ROOT _GRELU_ROOT _GRELU_CONDA_ENV _CONDA_BASE _CONDA_SH
+unset _d _NVIDIA_LIB_ROOT _ALPHAGENOME_SRC _GRELU_ROOT _GRELU_CONDA_ENV _CONDA_BASE _CONDA_SH
 
 echo "Activated conda environment: ${CONDA_PREFIX}"

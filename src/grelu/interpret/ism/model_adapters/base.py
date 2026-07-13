@@ -17,6 +17,9 @@ class TrackSpec:
     modality: str
     resolution_bp: int
     source: str
+    group: str = ""
+    strand: str = "."
+    description: str = ""
 
 
 class SequenceToProfileModel(Protocol):
