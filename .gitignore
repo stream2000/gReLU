@@ -76,3 +76,7 @@ agent-doc/
 /AGENTS.md
 /runs/
 /referrence/
+
+# Local history for superseded Saijou ISM implementations. The tracked
+# WORKFLOW_INDEX.md records why each file was archived and its replacement.
+/scripts/ism/experiments/saijou_hsc/archive/
