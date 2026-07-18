@@ -13,11 +13,11 @@ from torch.utils.data import DataLoader
 
 import grelu.lightning
 from borzoi_mmap_dataset import build_dataset_pair
+from saijou_tasks import TASK_NAMES
 
 
 DEFAULT_BIGWIG_DIR = "/work2/Projects/Project_DL_pillar/Finetune_Borzoi_Saijou_scRNAseq/bigwig"
 DEFAULT_GENOME = "/work/Database/Database_fromDocker/Referencedata_mm10/genome.fa"
-TASK_NAMES = ["hsc", "mac", "lsec", "chol"]
 BORZOI_LORA_TARGET_MODULES = (
     r"(?:conv_tower\.blocks\.\d+\.conv"
     r"|unet_tower\.blocks\.\d+\.conv\.conv"

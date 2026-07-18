@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 import grelu.lightning
 from alphagenome_pytorch.config import DtypePolicy
 from borzoi_mmap_dataset import build_dataset_pair
+from saijou_tasks import TASK_NAMES
 
 
 DEFAULT_BIGWIG_DIR = "/work2/Projects/Project_DL_pillar/Finetune_Borzoi_Saijou_scRNAseq/bigwig"
@@ -23,7 +24,6 @@ DEFAULT_WEIGHTS = (
     "~/.cache/huggingface/hub/models--gtca--alphagenome_pytorch/"
     "snapshots/b01c0ffa73e07c053491f3b5ea8bcf67d93b9920/model_fold_0.safetensors"
 )
-TASK_NAMES = ["hsc", "mac", "lsec", "chol"]
 ALPHAGENOME_LORA_TARGETS = ["mha", "mlp"]
 ALPHAGENOME_ACTIVE_LINEAR_TARGETS = ["tower."]
 ALPHAGENOME_128BP_CONV_TARGETS = ["encoder.", "embedder_128bp."]

@@ -19,7 +19,7 @@ FT_SCRIPT_DIR = REPO_ROOT / "src" / "ft-scripts"
 if str(FT_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(FT_SCRIPT_DIR))
 
-TASK_NAMES = ["hsc", "mac", "lsec", "chol"]
+from saijou_tasks import TASK_NAMES  # noqa: E402
 
 
 class AlphaGenomeFinetunedAdapter:
@@ -110,6 +110,11 @@ class AlphaGenomeFinetunedAdapter:
 
         device = self.requested_device
         if device != "cpu" and not torch.cuda.is_available():
+            print(
+                f"[alphagenome_finetuned] CUDA unavailable, falling back to cpu "
+                f"(requested {device})",
+                flush=True,
+            )
             device = "cpu"
         self._device = torch.device(device)
         model.eval()
@@ -141,6 +146,7 @@ class AlphaGenomeFinetunedAdapter:
             "input_length_bp": self.input_length_bp,
             "output_resolution_bp": self.output_resolution_bp,
             "output_length_bins": self.output_length_bins,
+            "device": str(self._device),
             **lora_result,
         }
 
@@ -178,5 +184,9 @@ class AlphaGenomeFinetunedAdapter:
             pred = self._model.forward(x).detach().cpu().numpy().astype(np.float32)
         if pred.ndim != 3:
             raise RuntimeError(f"Unexpected prediction shape: {pred.shape}")
+        if pred.shape[-1] != self.output_length_bins:
+            raise RuntimeError(
+                f"Expected {self.output_length_bins} AlphaGenome bins, got {pred.shape[-1]}"
+            )
         indices = track_indices(self.track_specs, tracks)
         return pred[:, indices, :]

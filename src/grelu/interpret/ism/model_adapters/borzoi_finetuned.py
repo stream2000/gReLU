@@ -17,7 +17,7 @@ FT_SCRIPT_DIR = REPO_ROOT / "src" / "ft-scripts"
 if str(FT_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(FT_SCRIPT_DIR))
 
-TASK_NAMES = ["hsc", "mac", "lsec", "chol"]
+from saijou_tasks import TASK_NAMES  # noqa: E402
 
 
 class BorzoiFinetunedAdapter:
@@ -88,6 +88,11 @@ class BorzoiFinetunedAdapter:
 
         device = self.requested_device
         if device != "cpu" and not torch.cuda.is_available():
+            print(
+                f"[borzoi_finetuned] CUDA unavailable, falling back to cpu "
+                f"(requested {device})",
+                flush=True,
+            )
             device = "cpu"
         self._device = torch.device(device)
         model.eval()
@@ -130,6 +135,7 @@ class BorzoiFinetunedAdapter:
             "output_length_bins": self.output_length_bins,
             "crop_len_bins_each_side": crop_len,
             "target_mode": train_params.get("loss"),
+            "device": str(self._device),
         }
 
     def predict_profiles(
