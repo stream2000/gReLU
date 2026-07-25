@@ -1,150 +1,141 @@
 # gReLU Replication Agent Guide
 
-Last updated: 2026-06-29.
+Last updated: 2026-07-25.
 
-This checkout is the user's fork. The active shared checkout lives at:
+This is the concise operating guide for the shared checkout:
 
 ```text
 /work2/Users/qijun/gReLU-replication
 ```
 
-`/home/fqijun/python/gReLU-replication` is expected to be a symlink to that
-shared path on configured hosts.
+`/home/fqijun/python/gReLU-replication` may be a symlink to the same checkout.
+Verify the live branch and worktree instead of relying on an older branch
+description.
 
-It is currently on the `alphagenome` branch. This branch contains the
-AlphaGenome integration code, including:
-
-```text
-src/grelu/model/trunks/alphagenome.py
-src/alphagenome_pytorch/
-tests/test_alphagenome_inference.py
-```
-
-`src/grelu/interpret/ism/` now exists here: the saturation ISM core and the
-Saijou HSC plugin have landed. The MREG plugin and the DIC work have not, so do
-not assume the MREG example runners exist until that merge/cherry-pick is done.
-See `docs/saturation_ism_framework_design.md` for the intended layering.
-
-## Environment
-
-Code and environment are intentionally separate concerns. Prefer the shared
-checkout path for code, but choose the conda environment per host and workload.
-Shared conda environments can be slow for Python startup/import because imports
-touch many small package and metadata files on shared storage.
-
-Default interactive setup:
+## Start here
 
 ```bash
 cd /work2/Users/qijun/gReLU-replication
+git status --short
 source activate.sh
+python - <<'PY'
+import grelu
+print(grelu.__file__)
+PY
 ```
 
-`activate.sh` activates a known working environment and prepends this checkout's
-`src/` to `PYTHONPATH`, so Python imports should resolve to:
+The expected import is:
 
 ```text
 /work2/Users/qijun/gReLU-replication/src/grelu
 ```
 
-For long training runs or plotting scripts on hosts where the shared env starts
-slowly, it is acceptable and often preferable to use the host-local env while
-keeping the shared repo on `PYTHONPATH`:
+`activate.sh` is the single environment entry point. It defaults to the
+user-home `grelu_dev` environment and prepends this checkout's `src/` to
+`PYTHONPATH`. Use its supported host overrides instead of duplicating conda
+activation in launchers.
 
-```bash
-cd /work2/Users/qijun/gReLU-replication
-source /work/miniconda3/etc/profile.d/conda.sh
-conda activate grelu_dev
-export PYTHONPATH=/work2/Users/qijun/gReLU-replication/src:${PYTHONPATH:-}
+## Repository scope
+
+- AlphaGenome integration lives under `src/grelu/model/trunks/alphagenome.py`
+  and `src/alphagenome_pytorch/`.
+- The reusable saturation ISM core lives under `src/grelu/interpret/ism/`.
+- Saijou model-case workflows live under
+  `scripts/ism/experiments/saijou_hsc/`.
+- Do not assume MREG or DIC workflows exist in this checkout; inspect before
+  referring to code from another worktree or branch.
+- Existing dirty-worktree changes belong to the user. Preserve them and stage
+  only files that belong to the current task.
+
+## Coordinate approval gate
+
+This is a hard review gate. Before any state-changing action that creates,
+changes, transforms, scans, annotates, or plots genomic coordinates:
+
+1. Present a concise coordinate contract to the user.
+2. Include only relevant fields: species/assembly, gene and transcript,
+   coordinate convention, strand/reporting orientation, anchor/window, and
+   authority source.
+3. State the proposed operation and wait for explicit approval before editing
+   manifests, running inference, producing annotations, or rendering plots.
+
+Read-only investigation needed to build the contract is allowed before
+approval. Once a contract is approved, reuse it without repeated clarification.
+Clarify again only if a contract field changes, sources conflict, or a new
+coordinate interpretation is required. Pure propagation or re-export of an
+already validated coordinate manifest does not require another approval.
+
+The purpose of this gate is to prevent silent coordinate assumptions, not to
+trigger broad or repetitive coordinate checking.
+
+## Saijou workflow rules
+
+Read these before adding or moving Saijou analysis code:
+
+```text
+scripts/ism/experiments/saijou_hsc/WORKFLOW_INDEX.md
+scripts/ism/experiments/saijou_hsc/ANALYSIS_HARNESS.md
 ```
 
-Do not assume the shared `/work/gReLU/env` is always the best runtime just
-because the source checkout is shared. Verify `import grelu; print(grelu.__file__)`
-when switching hosts or shells.
+The maintained baseline is the canonical nine-gene workflow plus the focused
+audited Mdk workflow.
 
-## Basic Checks
+- Treat scan width, transcript authority, ranking profile, motif threshold, and
+  report layout as parameters or versioned configuration, not new parallel
+  workflows.
+- Keep inference, reusable analysis, validated TSV/JSON interfaces, and report
+  rendering as separate layers.
+- Report renderers consume validated analysis outputs; they do not recompute
+  scientific results from raw model files.
+- New unvalidated investigations belong under `experimental/<topic>/`.
+  Promote reusable logic only after its metric contract, schema checks,
+  synthetic tests, and saved-artifact validation are documented.
 
-After activation, use these commands for a quick sanity check:
+See `docs/saturation_ism_framework_design.md` for the framework layering.
+
+## Progress and artifacts
+
+`experiments/Progress.md` is the current-state handoff and rolling two-month
+history. Keep the most recent fourteen calendar days at the established detail
+level, then retain days 15 through 60 as compact weekly summaries. Detailed
+entries record the branch/commit, command, checkpoint, output, validation,
+caveat, and next action when relevant; prefer a few meaningful entries per day
+over batch-level noise.
+
+Run Progress compaction once every seven days. Preserve detail that has aged
+beyond fourteen days under `experiments/archive/progress/`, update the weekly
+summaries, and record the compaction time, covered range, archive path,
+detailed cutoff, and next scheduled compaction in the active file. If nothing
+aged out, record a no-op compaction instead of rewriting history. Do not delete
+history less than two months old, prematurely compress the two-week detailed
+window, or impose a fixed line limit. Deletion or further compression beyond
+two months requires explicit user approval.
+
+Canonical analysis tables, figures, and PDFs stay in their experiment output
+directory. For a final PDF deliverable, also place a clearly named convenience
+copy in `/home/fqijun/report` without replacing the canonical artifact.
+
+## Verification and commits
+
+Use validation proportional to the change. The basic AlphaGenome check is:
 
 ```bash
-python - <<'PY'
-import grelu
-print(grelu.__file__)
-PY
-
+source activate.sh
 python -m pytest -q tests/test_alphagenome_inference.py
 ```
 
-For broader branch checks, inspect existing docs first:
+For Saijou changes, run the focused tests listed by `WORKFLOW_INDEX.md` and
+validate saved TSV/JSON interfaces. Always run `git diff --check` before a
+commit.
 
-```text
-SETUP_GUIDE.md
-scripts/README.md
-scripts/eqtl/README.md
-```
+Commit only the intended scope. Do not include generated experiment outputs,
+cache files, unrelated user changes, or local Progress archives.
 
-## Progress Notes
+## Documentation map
 
-Maintain a short `experiments/Progress.md` in this checkout. Update it after
-important usable results or branch-integration decisions. The Borzoi fine-tuning
-runbook lives at `experiments/RUNBOOK.md`.
-
-Record:
-
-- date/time
-- branch or commit being tested
-- exact command
-- model/checkpoint path when relevant
-- important output path
-- result or failure summary
-- caveats and next action
-
-Keep entries brief. If a later run corrects the same result, update the latest
-relevant entry instead of adding a correction-only note.
-
-## Report Artifacts
-
-Keep canonical report sources, analysis tables, figures, and the primary PDF in
-their project or experiment output directory. When a final deliverable includes
-a PDF, also copy that PDF to `/home/fqijun/report` (`~/report`) with a clear,
-descriptive filename so it is easy to find. Do not move or replace the canonical
-project artifact when making this convenience copy.
-
-## Saijou Analysis Harness
-
-For Saijou HSC ISM work, read
-`scripts/ism/experiments/saijou_hsc/WORKFLOW_INDEX.md` and
-`scripts/ism/experiments/saijou_hsc/ANALYSIS_HARNESS.md` before adding or
-moving analysis code. The maintained research baseline is the canonical
-nine-gene workflow plus the focused audited Mdk workflow.
-
-Keep model inference, reusable analysis, versioned analysis tables, and report
-rendering as separate layers. Report renderers must consume the validated
-TSV/JSON analysis interface rather than recomputing from raw parquet. Keep HTML
-and CSS in external templates rather than embedding large documents in Python.
-
-Unvalidated investigations belong under
-`scripts/ism/experiments/saijou_hsc/experimental/<topic>/`. They are research
-progress, not canonical evidence, and canonical or retained workflows must not
-import them. Promote code from `experimental/` only after its metric contract,
-schema checks, synthetic tests, and saved-artifact validation are documented.
-
-## Current Branch Discussion
-
-This checkout is intended to be a clean AlphaGenome-side replication workspace.
-Use it to test the AlphaGenome branch separately from the original dirty ISM
-worktree at:
-
-```text
-/home/fqijun/python/gReLU
-```
-
-Known branch gap as of 2026-06-25:
-
-- `origin/alphagenome` has AlphaGenome model/trunk support.
-- `origin/ism` adds the ISM framework, TF context utilities, MREG/DIC scripts,
-  reports, and tests.
-- the original local `ism` branch also has unpushed commits and uncommitted
-  MREG/ISM changes.
-
-Before moving ISM work into this checkout, decide whether to cherry-pick only
-the AlphaGenome-relevant trunk/runner fixes or merge the full ISM branch.
+- `SETUP_GUIDE.md`: AlphaGenome environment and inference setup.
+- `experiments/RUNBOOK.md`: Borzoi Saijou fine-tuning.
+- `scripts/README.md`: benchmark/script overview.
+- `scripts/ism/experiments/saijou_hsc/WORKFLOW_INDEX.md`: Saijou stage order.
+- `scripts/ism/experiments/saijou_hsc/ANALYSIS_HARNESS.md`: analysis contracts.
+- `experiments/Progress.md`: current validated state and open decisions.
