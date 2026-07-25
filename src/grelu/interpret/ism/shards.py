@@ -25,6 +25,7 @@ PROVENANCE_KEYS = (
     "output_resolution_bp",
     "output_length_bins",
 )
+PATH_PROVENANCE_KEYS = frozenset({"checkpoint_path", "weights_path"})
 
 
 @dataclass(frozen=True)
@@ -76,13 +77,24 @@ def _validate_shard_provenance(
         differences = {
             key: (baseline_metadata.get(key), item.get(key))
             for key in PROVENANCE_KEYS
-            if baseline_metadata.get(key) != item.get(key)
+            if _normalized_provenance_value(
+                key, baseline_metadata.get(key)
+            )
+            != _normalized_provenance_value(key, item.get(key))
         }
         if differences:
             raise RuntimeError(
                 f"Model provenance differs in shard {source}: {differences}"
             )
     return baseline_tracks, baseline_metadata
+
+
+def _normalized_provenance_value(key: str, value: object) -> object:
+    """Normalize path spellings while retaining hash-based identity checks."""
+
+    if key not in PATH_PROVENANCE_KEYS or value in (None, ""):
+        return value
+    return str(Path(str(value)).expanduser().resolve())
 
 
 def _complete_gene_source(

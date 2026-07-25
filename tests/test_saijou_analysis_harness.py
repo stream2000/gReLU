@@ -10,6 +10,10 @@ from scripts.ism.experiments.saijou_hsc.tools.harness import (
     require_finite,
     require_unique,
 )
+from scripts.ism.experiments.saijou_hsc.tools.region_importance import (
+    combine_models,
+    reference_bins,
+)
 
 
 def test_harness_schema_key_and_finite_contracts():
@@ -45,3 +49,36 @@ def test_window_summary_preserves_signed_effect_and_ranks_cells():
     assert hsc.median_signed_log2fc.lt(0).all()
     assert hsc.fraction_centers_negative.eq(1).all()
     assert hsc.centers.eq(2).all()
+
+
+def test_cross_model_track_score_uses_the_weaker_same_track_percentile():
+    rows = []
+    for model, percentile, effect in (
+        ("AlphaGenome", 0.95, -0.4),
+        ("Borzoi", 0.80, -0.2),
+    ):
+        rows.append(
+            {
+                "gene": "GeneA",
+                "variant_offset_from_tss_transcription_bp": 11,
+                "track_id": "hsc",
+                "readout_role": "gene_body_output_clipped",
+                "model": model,
+                "model_tail_percentile": percentile,
+                "median_signed_log2fc": effect,
+            }
+        )
+    combined = combine_models(pd.DataFrame(rows))
+
+    assert combined.cross_model_conjunction.tolist() == [0.80]
+    assert combined.model_direction_agreement.tolist() == [True]
+
+
+def test_reference_bins_are_deterministic_with_tied_values():
+    values = pd.Series([0.0] * 100 + [1.0] * 100)
+
+    first = reference_bins(values, requested=10)
+    second = reference_bins(values, requested=10)
+
+    assert first.equals(second)
+    assert first.nunique() == 2

@@ -7,6 +7,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Mapping
 
 import pandas as pd
 
@@ -75,10 +76,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--readout-bp", type=int, default=1024)
     parser.add_argument("--profile-resolution-bp", type=int, default=128)
     parser.add_argument("--profile-dtype-bytes", type=int, default=2)
+    parser.add_argument(
+        "--transcript-authority",
+        type=Path,
+        help=(
+            "Optional TSV that preregisters exact transcript IDs, PDF intervals, "
+            "strand and TSS. When supplied, its gene order replaces --genes."
+        ),
+    )
+    parser.add_argument(
+        "--authority-pdf-flank-bp",
+        type=int,
+        default=5_000,
+        help="Flank included on each side of transcript intervals in the authority TSV.",
+    )
     return parser.parse_args()
 
 
-def load_genes(gtf_path: str | Path, requested: list[str]) -> pd.DataFrame:
+def load_genes(
+    gtf_path: str | Path,
+    requested: list[str],
+    *,
+    transcript_overrides: Mapping[str, str] | None = None,
+) -> pd.DataFrame:
     columns = [
         "chrom", "source", "feature", "start", "end", "score", "strand", "frame", "attributes"
     ]
@@ -120,7 +140,9 @@ def load_genes(gtf_path: str | Path, requested: list[str]) -> pd.DataFrame:
         raise ValueError(f"Genes not found in GTF: {missing}")
 
     transcripts = table.loc[table.feature.eq("transcript")]
-    for gene, transcript_id in TRANSCRIPT_OVERRIDES.items():
+    if transcript_overrides is None:
+        transcript_overrides = TRANSCRIPT_OVERRIDES
+    for gene, transcript_id in transcript_overrides.items():
         if gene not in requested:
             continue
         matches = transcripts.loc[
@@ -140,6 +162,134 @@ def load_genes(gtf_path: str | Path, requested: list[str]) -> pd.DataFrame:
         genes.loc[idx, "tss_source"] = f"gtf_transcript:{transcript_id}"
     order = {gene: idx for idx, gene in enumerate(requested)}
     return genes.sort_values("gene", key=lambda x: x.map(order)).reset_index(drop=True)
+
+
+def load_authoritative_genes(
+    gtf_path: str | Path,
+    authority_path: Path,
+    *,
+    pdf_flank_bp: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Resolve and audit exact boss-supplied mouse transcripts against mm10."""
+
+    authority = pd.read_csv(authority_path, sep="\t")
+    required = {
+        "gene",
+        "pdf_filename",
+        "transcript_name",
+        "transcript_id",
+        "chrom",
+        "strand",
+        "pdf_plot_start",
+        "pdf_plot_end",
+        "analysis_tss_0based",
+    }
+    missing = sorted(required.difference(authority.columns))
+    if missing:
+        raise ValueError(f"Transcript authority missing columns: {missing}")
+    if authority.gene.duplicated().any() or authority.transcript_id.duplicated().any():
+        raise ValueError("Transcript authority genes and transcript IDs must be unique")
+
+    requested = authority.gene.astype(str).tolist()
+    genes = load_genes(
+        gtf_path,
+        requested,
+        transcript_overrides={},
+    ).set_index("gene")
+    columns = [
+        "chrom",
+        "source",
+        "feature",
+        "start",
+        "end",
+        "score",
+        "strand",
+        "frame",
+        "attributes",
+    ]
+    transcripts = pd.read_csv(
+        gtf_path,
+        sep="\t",
+        comment="#",
+        header=None,
+        names=columns,
+        usecols=range(9),
+        low_memory=False,
+    )
+    transcripts = transcripts.loc[transcripts.feature.eq("transcript")].copy()
+    for field in ("transcript_id", "transcript_name", "gene_name"):
+        transcripts[field] = transcripts.attributes.astype(str).map(
+            lambda value, name=field: gtf_attr(value, name)
+        )
+
+    audit_rows: list[dict[str, object]] = []
+    for row in authority.itertuples(index=False):
+        selected = transcripts.loc[
+            transcripts.transcript_id.eq(str(row.transcript_id))
+        ]
+        if len(selected) != 1:
+            raise ValueError(
+                f"Expected one mm10 transcript {row.transcript_id}, found {len(selected)}"
+            )
+        transcript = selected.iloc[0]
+        start = int(transcript.start) - 1
+        end = int(transcript.end)
+        strand = str(transcript.strand)
+        tss = start if strand == "+" else end
+        checks = {
+            "gene_name_match": str(transcript.gene_name) == str(row.gene),
+            "transcript_name_match": (
+                str(transcript.transcript_name) == str(row.transcript_name)
+            ),
+            "chrom_match": str(transcript.chrom) == str(row.chrom),
+            "strand_match": strand == str(row.strand),
+            "pdf_start_match": (
+                start == int(row.pdf_plot_start) + int(pdf_flank_bp)
+            ),
+            "pdf_end_match": end == int(row.pdf_plot_end) - int(pdf_flank_bp),
+            "tss_match": tss == int(row.analysis_tss_0based),
+        }
+        if not all(checks.values()):
+            raise ValueError(
+                {
+                    "gene": row.gene,
+                    "transcript_id": row.transcript_id,
+                    "checks": checks,
+                }
+            )
+        genes.loc[row.gene, ["chrom", "strand", "start", "end"]] = [
+            str(row.chrom),
+            strand,
+            start,
+            end,
+        ]
+        genes.loc[row.gene, "analysis_tss"] = tss
+        genes.loc[row.gene, "tes"] = end if strand == "+" else start
+        genes.loc[row.gene, "tss_source"] = (
+            f"boss_pdf_transcript:{row.transcript_id}"
+        )
+        genes.loc[row.gene, "length"] = end - start
+        audit_rows.append(
+            {
+                "species": "Mus musculus",
+                "assembly": "mm10",
+                "gene": row.gene,
+                "pdf_filename": row.pdf_filename,
+                "transcript_name": row.transcript_name,
+                "transcript_id": row.transcript_id,
+                "chrom": row.chrom,
+                "strand": strand,
+                "transcript_start_0based": start,
+                "transcript_end_0based_exclusive": end,
+                "analysis_tss_0based": tss,
+                "tes_0based": end if strand == "+" else start,
+                **checks,
+            }
+        )
+    return (
+        genes.loc[requested].reset_index(),
+        pd.DataFrame.from_records(audit_rows),
+    )
 
 
 def add_readout(
@@ -223,7 +373,14 @@ def _scan_gene(
     centers: list[int],
     args: argparse.Namespace,
 ) -> tuple[list[dict], list[dict], dict[str, object]]:
-    locus_id = f"{gene.gene.lower()}_tss1kb_span10_strict_scan"
+    window_tag = (
+        "tss1kb"
+        if int(args.half_window_bp) == 512
+        else f"tss{2 * int(args.half_window_bp)}bp"
+    )
+    locus_id = (
+        f"{gene.gene.lower()}_{window_tag}_span{int(args.span_bp)}_strict_scan"
+    )
     scan = AnchoredScan(
         locus_id=locus_id,
         chrom=gene.chrom,
@@ -236,7 +393,10 @@ def _scan_gene(
         gene=gene.gene,
         tes=int(gene.tes),
         control_type="standard_scan",
-        source="Mdk-style TSS-centered 10-bp strict-shuffle scan",
+        source=(
+            f"TSS-centered +/-{int(args.half_window_bp)}-bp "
+            f"{int(args.span_bp)}-bp strict-shuffle scan"
+        ),
     )
     edits, excluded = scan_anchored_strict_shuffles(
         fasta=fasta,
@@ -257,7 +417,10 @@ def _scan_gene(
         "span_bp": args.span_bp,
         "replicates": args.replicates,
         "centers": json.dumps(mutable),
-        "evidence": "standard nine-gene Mdk-style discovery scan",
+        "evidence": (
+            f"nine-gene TSS-centered +/-{int(args.half_window_bp)}-bp "
+            "discovery scan"
+        ),
         "chrom": gene.chrom,
         "strand": gene.strand,
         "analysis_tss": int(gene.analysis_tss),
@@ -364,14 +527,23 @@ def write_prepared_tables(
 
 def main() -> None:
     args = parse_args()
-    requested = [gene.strip() for gene in args.genes.split(",") if gene.strip()]
+    coordinate_audit = None
+    if args.transcript_authority:
+        genes, coordinate_audit = load_authoritative_genes(
+            args.gtf,
+            args.transcript_authority,
+            pdf_flank_bp=args.authority_pdf_flank_bp,
+        )
+        requested = genes.gene.astype(str).tolist()
+    else:
+        requested = [gene.strip() for gene in args.genes.split(",") if gene.strip()]
+        genes = load_genes(args.gtf, requested)
     centers = anchored_scan_centers(
         half_window_bp=args.half_window_bp,
         span_bp=args.span_bp,
         stride_bp=args.stride_bp,
     )
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    genes = load_genes(args.gtf, requested)
     manifest, exclusions, loci = prepare_mutation_tables(genes, centers, args)
     readouts = build_readouts(genes, args.readout_bp, args.hsc_bigwig)
     write_prepared_tables(
@@ -389,6 +561,35 @@ def main() -> None:
         exclusions=exclusions,
         readouts=readouts,
         args=args,
+    )
+    if coordinate_audit is not None:
+        coordinate_audit.to_csv(
+            args.out_dir / "coordinate_authority_audit.tsv",
+            sep="\t",
+            index=False,
+        )
+        check_columns = [column for column in coordinate_audit if column.endswith("_match")]
+        validation.update(
+            {
+                "species": "Mus musculus",
+                "assembly": "mm10",
+                "coordinate_authority": str(args.transcript_authority.resolve()),
+                "coordinate_authority_rows": int(len(coordinate_audit)),
+                "coordinate_checks_passed": bool(
+                    coordinate_audit[check_columns].all().all()
+                ),
+            }
+        )
+    validation.update(
+        {
+            "scan_tx_offset_start": int(min(centers)),
+            "scan_tx_offset_end": int(max(centers)),
+            "scan_requested_span_bp": int(2 * args.half_window_bp),
+            "edit_windows_within_requested_span": bool(
+                min(centers) - args.span_bp // 2 == -args.half_window_bp
+                and max(centers) + args.span_bp // 2 == args.half_window_bp
+            ),
+        }
     )
     (args.out_dir / "validation_summary.json").write_text(
         json.dumps(validation, indent=2) + "\n"

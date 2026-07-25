@@ -14,8 +14,12 @@ Run these stages in order:
    original AlphaGenome/Borzoi backends. `tools/finalize_saijou_sharded_run.py`
    merges per-gene shards when a run is distributed.
 3. `analyze_saijou_all_genes_10bp_scan.py` scores fine-tuned results, annotates
-   transcript/splice context, and selects two candidates per gene.
+   transcript/splice context, and selects candidates. Its maintained default is
+   the HSC profile; `--analysis-profile cross_model_track` selects the generic
+   fixed-readout score without creating another analysis entry point.
 4. `annotate_saijou_candidate_motifs.py` scans candidate edits against motifs.
+   `--annotation-profile native_loss` applies the conservative native motif-loss
+   gate used by the generic score.
 5. `compare_saijou_candidate_original_models.py` compares the same selected
    edits across original and fine-tuned models.
 6. `analyze_mdk_shuffle_manifest_robustness.py` compares the current Mdk scan
@@ -35,14 +39,25 @@ index. Reusable or specialist code lives under `tools/`:
 - `tools/report_*.py`: report data, figures, specification, and summary-table
   helpers. Artifact assembly and print finalization stay in the report entry
   point because they are part of one delivery operation.
+- `tools/build_nine_gene_browser_report.py`: thin CLI for the four cell-specific
+  two-panel Browser PDFs. Its helper consumes validated analysis TSVs plus saved
+  reference profiles; it never recomputes scores from raw feature parquet.
 - `tools/finalize_saijou_sharded_run.py`: distributed-run assembly.
 - `tools/effect_summary.py`: shared signed-effect and fixed-readout summaries
   used by both the nine-gene report and focused Mdk analysis.
+- `tools/region_importance.py`: shared model/track calibration, cross-model
+  conjunction score, region calling, and positive-control threshold audit.
+- `tools/cell_browser_report.py`: shared observed/reference/log2FC data and
+  four-cell two-panel PDF renderer.
 - `tools/harness.py`: path, schema, key, finiteness, and JSON contracts.
 - `tools/mdk/`: focused Mdk audit tools outside the canonical nine-gene path.
 
 - `tools/manifests.py`: the strict-shuffle mutation manifest schema, its two
   mutation-id shapes, and the excluded-window table.
+- `configs/provided_nine_gene_transcripts.tsv`: exact boss-PDF transcript/TSS
+  authority, checked against the mm10 GTF by the canonical preparer.
+- `configs/positive_control_registry.tsv`: registered wet/reported TF--gene
+  intervals and coordinate-evidence policy.
 
 Neither sequence editing nor the manifest schema is per-preparer code. The three
 strict-shuffle preparers — `prepare_saijou_all_genes_10bp_scan.py`,
@@ -62,6 +77,40 @@ One deliberate exception: `tools/genomics.py::add_genomic_annotation` mirrors
 
 See `ANALYSIS_HARNESS.md` for the required analysis/report boundary and the
 promotion rules for new experimental work.
+
+## Wider TSS scan preset
+
+The boss-transcript TSS +/-1500-bp run is the canonical workflow with different
+parameters, not a separate workflow:
+
+```bash
+root=experiments/ism/saijou_nine_gene_tss_3kb_strict_shuffle_pdf_transcripts
+
+python scripts/ism/experiments/saijou_hsc/prepare_saijou_all_genes_10bp_scan.py \
+  --transcript-authority scripts/ism/experiments/saijou_hsc/configs/provided_nine_gene_transcripts.tsv \
+  --half-window-bp 1500 \
+  --out-dir "${root}/prepared"
+
+# Run or shard both fine-tuned models with run_saijou_targeted_ism.py, then use
+# tools/finalize_saijou_sharded_run.py exactly as in the canonical workflow.
+
+python scripts/ism/experiments/saijou_hsc/analyze_saijou_all_genes_10bp_scan.py \
+  --root "${root}" \
+  --analysis-profile cross_model_track \
+  --transcript-authority scripts/ism/experiments/saijou_hsc/configs/provided_nine_gene_transcripts.tsv
+
+python scripts/ism/experiments/saijou_hsc/annotate_saijou_candidate_motifs.py \
+  --root "${root}" \
+  --annotation-profile native_loss \
+  --pthresh 1e-4
+
+python scripts/ism/experiments/saijou_hsc/tools/build_nine_gene_browser_report.py \
+  --root "${root}" \
+  --half-window-bp 1500
+```
+
+Only the two configuration TSVs are preset-specific. Inference, shard
+finalization, analysis, motif annotation, and report entry points are shared.
 
 ## Retained Mdk audit workflow
 
@@ -108,6 +157,7 @@ canonical or Mdk workflows may import from it.
 | `build_saijou_hsc_ism_pdf_report.py` | First broad-region PDF builder | canonical nine-gene portable report |
 | `build_saijou_hsc_ism_audit_pdf.py` | One-off audit PDF builder | `docs/saijou_ism_engineering.md` and pipeline validator |
 | `build_saijou_targeted_report.py` | Earlier six-locus original-vs-fine report | nine-gene report plus retained Mdk-specific report |
+| `random_base_replacement/` | Completed composition-breaking replacement prototype and one-off reports | archived until a second use justifies a core random-replacement generator and canonical analysis profile |
 
 To inspect an archived implementation, read it in place. Restore it to the
 active directory only if a current workflow needs behavior that is not already

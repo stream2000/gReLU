@@ -21,14 +21,14 @@ def _mutation(gene, index):
     }
 
 
-def _write_shard_header(path):
+def _write_shard_header(path, checkpoint_path="fake.ckpt"):
     path.mkdir()
     pd.DataFrame(
         [{"track_id": "hsc", "track_group": "hsc_finetuned_10x"}]
     ).to_csv(path / "track_manifest.tsv", sep="\t", index=False)
     metadata = {
         "model_id": "fake",
-        "checkpoint_path": "fake.ckpt",
+        "checkpoint_path": checkpoint_path,
         "weights_path": "",
         "checkpoint_sha256": "abc",
         "prepared_manifest_sha256": "def",
@@ -122,3 +122,20 @@ def test_finalize_shards_combines_complete_genes(tmp_path):
         target / "features/combined_mutation_features.tsv", sep="\t"
     )
     assert combined.mutation_id.tolist() == ["GeneA_m0", "GeneB_m1"]
+
+
+def test_finalize_shards_accepts_equivalent_checkpoint_paths(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    checkpoint = tmp_path / "runs" / "fake.ckpt"
+    checkpoint.parent.mkdir()
+    checkpoint.touch()
+
+    source_a = tmp_path / "shard_a"
+    source_b = tmp_path / "shard_b"
+    _write_shard_header(source_a, str(checkpoint))
+    _write_shard_header(source_b, "runs/fake.ckpt")
+
+    from grelu.interpret.ism.shards import _validate_shard_provenance
+
+    _, metadata = _validate_shard_provenance([source_a, source_b])
+    assert metadata["checkpoint_path"] == str(checkpoint)

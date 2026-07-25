@@ -38,6 +38,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fasta", type=Path, default=DEFAULT_FASTA)
     parser.add_argument("--context-bp", type=int, default=80)
     parser.add_argument("--pthresh", type=float, default=1e-3)
+    parser.add_argument(
+        "--annotation-profile",
+        choices=("candidate_disruption", "native_loss"),
+        default="candidate_disruption",
+    )
+    parser.add_argument("--motif-loss-delta", type=float, default=5.0)
+    parser.add_argument("--motif-loss-replicates", type=int, default=2)
+    parser.add_argument("--max-families-per-region", type=int, default=1)
     return parser.parse_args()
 
 
@@ -171,9 +179,276 @@ def _validation_summary(
     return validation
 
 
+def _native_loss_scan_regions(
+    regions: pd.DataFrame, controls: pd.DataFrame
+) -> pd.DataFrame:
+    candidate = regions.copy()
+    candidate["scan_kind"] = "ranked_candidate"
+    candidate["expected_family"] = ""
+    control_rows = []
+    for screen_rank, row in enumerate(controls.itertuples(index=False), start=1001):
+        control_rows.append(
+            {
+                "screen_rank": screen_rank,
+                "gene": row.gene,
+                "region_start": int(row.start),
+                "region_end": int(row.end),
+                "region_label": row.label,
+                "region_score": float(row.best_score),
+                "peak_score": float(row.best_score),
+                "peak_offset": int(row.best_center),
+                "driving_track": str(row.driving_track),
+                "driving_readout": str(row.driving_readout),
+                "evidence_tier": str(row.evidence),
+                "scan_kind": "registered_positive_control",
+                "expected_family": str(row.family),
+            }
+        )
+    control = pd.DataFrame.from_records(control_rows)
+    columns = sorted(set(candidate.columns).union(control.columns))
+    return pd.concat(
+        [candidate.reindex(columns=columns), control.reindex(columns=columns)],
+        ignore_index=True,
+    )
+
+
+def _assign_native_loss_regions(
+    manifest: pd.DataFrame, regions: pd.DataFrame
+) -> pd.DataFrame:
+    pieces = []
+    for region in regions.itertuples(index=False):
+        selected = manifest.loc[
+            manifest.gene.eq(region.gene)
+            & manifest.variant_offset_from_tss_transcription_bp.between(
+                int(region.region_start), int(region.region_end)
+            )
+        ].copy()
+        if selected.empty:
+            raise ValueError(f"No mutations cover screen rank {region.screen_rank}")
+        selected["locus_id"] = f"region_{int(region.screen_rank):02d}"
+        pieces.append(selected)
+    return pd.concat(pieces, ignore_index=True)
+
+
+def _native_loss_annotations(
+    scan_regions: pd.DataFrame,
+    scores: pd.DataFrame,
+    *,
+    delta: float,
+    replicates: int,
+    max_families: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    scores = scores.rename(columns={"signed_score_change": "signed_score_loss"})
+    scores["passes_native_loss"] = (
+        scores.ref.gt(0) & scores.signed_score_loss.ge(delta)
+    )
+    center = (
+        scores.groupby(
+            ["candidate_segment_id", "gene", "center", "motif", "family"],
+            sort=False,
+        )
+        .agg(
+            replacement_replicates=("mutation_id", "nunique"),
+            loss_replicates=("passes_native_loss", "sum"),
+            median_signed_score_loss=("signed_score_loss", "median"),
+            max_signed_score_loss=("signed_score_loss", "max"),
+        )
+        .reset_index()
+    )
+    eligible = center.loc[
+        center.loss_replicates.ge(replicates)
+        & center.median_signed_score_loss.ge(delta)
+        & center.family.ne("OTHER")
+    ].copy()
+    motif_rank = (
+        eligible.groupby(
+            ["candidate_segment_id", "gene", "family", "motif"], sort=False
+        )
+        .agg(
+            affected_centers=("center", "nunique"),
+            motif_position=("center", "median"),
+            median_score_loss=("median_signed_score_loss", "median"),
+            max_score_loss=("max_signed_score_loss", "max"),
+        )
+        .reset_index()
+        .sort_values(
+            [
+                "candidate_segment_id",
+                "affected_centers",
+                "median_score_loss",
+                "max_score_loss",
+                "motif",
+            ],
+            ascending=[True, False, False, False, True],
+        )
+    )
+    family = (
+        motif_rank.groupby(
+            ["candidate_segment_id", "gene", "family"], sort=False
+        )
+        .agg(
+            affected_centers=("affected_centers", "max"),
+            supporting_motifs=("motif", "nunique"),
+            motif_position=("motif_position", "median"),
+            median_score_loss=("median_score_loss", "max"),
+            max_score_loss=("max_score_loss", "max"),
+        )
+        .reset_index()
+    )
+    top_motifs = motif_rank.drop_duplicates(
+        ["candidate_segment_id", "gene", "family"], keep="first"
+    )[["candidate_segment_id", "gene", "family", "motif"]].rename(
+        columns={"motif": "top_motif"}
+    )
+    family = family.merge(
+        top_motifs,
+        on=["candidate_segment_id", "gene", "family"],
+        how="left",
+        validate="one_to_one",
+    ).sort_values(
+        [
+            "candidate_segment_id",
+            "affected_centers",
+            "median_score_loss",
+            "max_score_loss",
+            "family",
+        ],
+        ascending=[True, False, False, False, True],
+    )
+    family["family_rank"] = family.groupby("candidate_segment_id").cumcount() + 1
+    family = family.loc[family.family_rank.le(max_families)].copy()
+
+    base = scan_regions.copy()
+    base["candidate_segment_id"] = base.screen_rank.map(
+        lambda value: f"region_{int(value):02d}"
+    )
+    annotations = base.merge(
+        family,
+        on=["candidate_segment_id", "gene"],
+        how="left",
+        validate="one_to_many",
+    )
+    annotations["region_id"] = annotations.candidate_segment_id
+    annotations["family"] = annotations.family.fillna("UNRESOLVED")
+    annotations["top_motif"] = annotations.top_motif.fillna("")
+    annotations["family_rank"] = annotations.family_rank.fillna(1).astype(int)
+    annotations["annotation_status"] = np.where(
+        annotations.family.eq("UNRESOLVED"),
+        "no_consistent_native_motif_loss",
+        "consistent_native_motif_loss",
+    )
+    annotations["matches_expected_family"] = np.where(
+        annotations.scan_kind.eq("registered_positive_control"),
+        annotations.family.eq(annotations.expected_family),
+        np.nan,
+    )
+    return center, annotations
+
+
+def _run_native_loss(root: Path, args: argparse.Namespace) -> dict[str, object]:
+    analysis = root / "analysis"
+    regions = pd.read_csv(analysis / "top_important_regions.tsv", sep="\t")
+    controls = pd.read_csv(analysis / "positive_control_recall.tsv", sep="\t")
+    manifest = pd.read_csv(root / "prepared/mutation_manifest.tsv", sep="\t")
+    scan_regions = _native_loss_scan_regions(regions, controls)
+
+    assigned_parts = []
+    hit_parts = []
+    motif_count = 0
+    for _, group in scan_regions.groupby("scan_kind", sort=False):
+        assigned = _assign_native_loss_regions(manifest, group)
+        _, motifs, hits = _scan_candidate_motifs(assigned, args)
+        assigned_parts.append(assigned)
+        hit_parts.append(hits)
+        motif_count = motif_count or len(motifs)
+        if motif_count != len(motifs):
+            raise ValueError("JASPAR motif count changed between scan groups")
+    assigned = pd.concat(assigned_parts, ignore_index=True)
+    hits = pd.concat(hit_parts, ignore_index=True)
+    overlap, scores = _disruption_scores(hits)
+    center, annotations = _native_loss_annotations(
+        scan_regions,
+        scores,
+        delta=args.motif_loss_delta,
+        replicates=args.motif_loss_replicates,
+        max_families=args.max_families_per_region,
+    )
+    family_columns = [
+        "candidate_segment_id",
+        "gene",
+        "family",
+        "affected_centers",
+        "supporting_motifs",
+        "motif_position",
+        "median_score_loss",
+        "max_score_loss",
+        "top_motif",
+        "family_rank",
+    ]
+    families = annotations.loc[
+        annotations.family.ne("UNRESOLVED"), family_columns
+    ].drop_duplicates()
+    annotations.to_csv(
+        analysis / "region_motif_annotations.tsv", sep="\t", index=False
+    )
+    scores.to_parquet(analysis / "motif_loss_by_mutation.parquet", index=False)
+    center.to_csv(analysis / "motif_loss_by_center.tsv", sep="\t", index=False)
+    families.to_csv(
+        analysis / "motif_loss_by_region_family.tsv", sep="\t", index=False
+    )
+    scan_regions.to_csv(
+        analysis / "motif_scan_regions.tsv", sep="\t", index=False
+    )
+
+    candidate_annotations = annotations.loc[
+        annotations.scan_kind.eq("ranked_candidate")
+        & annotations.annotation_status.eq("consistent_native_motif_loss")
+    ]
+    control_annotations = annotations.loc[
+        annotations.scan_kind.eq("registered_positive_control")
+    ]
+    validation = {
+        "status": "ok",
+        "motif_release": "JASPAR2024 vertebrates",
+        "motif_pthresh": float(args.pthresh),
+        "motif_loss_delta": float(args.motif_loss_delta),
+        "motif_loss_replicates": int(args.motif_loss_replicates),
+        "jaspar_motifs": int(motif_count),
+        "scan_regions": int(len(scan_regions)),
+        "candidate_regions": int(len(regions)),
+        "registered_positive_controls": int(len(controls)),
+        "manifest_mutations_scanned": int(len(assigned)),
+        "overlapping_motif_hits": int(len(overlap)),
+        "candidate_regions_with_motif_loss": int(
+            candidate_annotations.region_id.nunique()
+        ),
+        "controls_matching_expected_family": int(
+            control_annotations.matches_expected_family.fillna(False).sum()
+        ),
+        "nonfinite_center_loss_values": int(
+            center[["median_signed_score_loss", "max_signed_score_loss"]]
+            .isna()
+            .sum()
+            .sum()
+        ),
+    }
+    if validation["nonfinite_center_loss_values"]:
+        validation["status"] = "failed"
+    (analysis / "motif_validation_summary.json").write_text(
+        json.dumps(validation, indent=2) + "\n"
+    )
+    print(json.dumps(validation, indent=2))
+    if validation["status"] != "ok":
+        raise RuntimeError(validation)
+    return validation
+
+
 def main() -> None:
     args = parse_args()
     root = args.root.resolve()
+    if args.annotation_profile == "native_loss":
+        _run_native_loss(root, args)
+        return
     analysis = root / "analysis"
     manifest = pd.read_csv(
         root / "prepared_original_candidates/mutation_manifest.tsv", sep="\t"

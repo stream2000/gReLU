@@ -527,6 +527,14 @@ Each plugin should provide only:
 - ranking presets.
 - plots/report layout.
 
+An experimental preset is not a new plugin. Changing the scan half-width,
+transcript authority table, ranking profile, motif-loss threshold, or report
+layout must reuse the plugin entry points through CLI options and small
+versioned TSV configuration tables. A parallel `prepare/run/analyze/plot`
+directory is justified only when the biological input contract or mutation
+primitive changes, not when the same strict-shuffle experiment is rerun over a
+wider TSS window.
+
 #### MREG Plugin
 
 Initial files:

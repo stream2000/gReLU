@@ -4,16 +4,31 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Mapping
 
 import numpy as np
 import pandas as pd
 
 
-# Genes whose gene-level TSS is not the biologically relevant promoter. Acta2's
-# proximal CArG sites fall outside a 1 kb window around the gene-level TSS.
-# The preparers scan around the TSS this picks and the analysis annotates against
-# the transcript this picks, so the two stages must read one definition: a split
-# copy would leave both stages internally consistent and silently disagreeing.
+TRANSCRIPT_AUTHORITY = (
+    Path(__file__).resolve().parents[1]
+    / "configs/provided_nine_gene_transcripts.tsv"
+)
+
+
+def load_transcript_overrides(
+    path: Path = TRANSCRIPT_AUTHORITY,
+) -> dict[str, str]:
+    """Load the one versioned transcript definition shared by all stages."""
+
+    table = pd.read_csv(path, sep="\t", usecols=["gene", "transcript_id"])
+    if table.gene.duplicated().any() or table.transcript_id.duplicated().any():
+        raise ValueError(f"Transcript authority keys are not unique: {path}")
+    return dict(zip(table.gene.astype(str), table.transcript_id.astype(str)))
+
+
+# Maintained canonical behavior. Wider or externally registered transcript
+# presets must be passed explicitly through ``load_transcript_overrides``.
 TRANSCRIPT_OVERRIDES = {"Acta2": "ENSMUST00000238147"}
 GTF_COLUMNS = (
     "chrom",
@@ -52,12 +67,15 @@ def _read_gtf(gtf_path: str | Path) -> pd.DataFrame:
 
 
 def _select_transcript(
-    table: pd.DataFrame, gene_name: str, analysis_tss: int
+    table: pd.DataFrame,
+    gene_name: str,
+    analysis_tss: int,
+    transcript_overrides: Mapping[str, str],
 ) -> pd.Series:
     transcripts = table.loc[
         table.feature.eq("transcript") & table.gene_name.eq(gene_name)
     ].copy()
-    override = TRANSCRIPT_OVERRIDES.get(gene_name)
+    override = transcript_overrides.get(gene_name)
     if override:
         selected = transcripts.loc[transcripts.transcript_id.eq(override)]
     else:
@@ -130,7 +148,10 @@ def _splice_sites(
 
 
 def load_gtf_annotations(
-    gtf_path: str | Path, genes: pd.DataFrame
+    gtf_path: str | Path,
+    genes: pd.DataFrame,
+    *,
+    transcript_overrides: Mapping[str, str] | None = None,
 ) -> tuple[
     dict[str, str],
     dict[str, list[tuple[int, int]]],
@@ -141,13 +162,20 @@ def load_gtf_annotations(
     """Select one transcript per gene and return its interval annotations."""
 
     table = _read_gtf(gtf_path)
+    if transcript_overrides is None:
+        transcript_overrides = TRANSCRIPT_OVERRIDES
     transcript_ids = {}
     exon_intervals = {}
     splice_sites = {}
     transcript_features = {}
     transcript_metadata = {}
     for gene in genes.itertuples(index=False):
-        selected = _select_transcript(table, gene.gene, int(gene.analysis_tss))
+        selected = _select_transcript(
+            table,
+            gene.gene,
+            int(gene.analysis_tss),
+            transcript_overrides,
+        )
         transcript_id = str(selected.transcript_id)
         exons = _feature_intervals(table, transcript_id, "exon")
         transcript_ids[gene.gene] = transcript_id

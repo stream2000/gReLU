@@ -65,6 +65,15 @@ source activate.sh
 python scripts/ism/experiments/saijou_hsc/build_saijou_all_genes_10bp_report.py
 ```
 
+Four cell-specific nine-gene Browser PDFs:
+
+```bash
+source activate.sh
+python scripts/ism/experiments/saijou_hsc/tools/build_nine_gene_browser_report.py \
+  --root experiments/ism/<run> \
+  --half-window-bp 1500
+```
+
 Focused `Mdk` analysis and report:
 
 ```bash

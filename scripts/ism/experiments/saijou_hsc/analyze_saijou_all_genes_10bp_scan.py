@@ -17,10 +17,12 @@ if __package__:
         load_gtf_annotations,
     )
     from .tools.candidates import cluster_candidates
+    from .tools.region_importance import run_cross_model_track_analysis
 else:
     from tools.effect_summary import strongest_signed_profile
     from tools.genomics import add_genomic_annotation, load_gtf_annotations
     from tools.candidates import cluster_candidates
+    from tools.region_importance import run_cross_model_track_analysis
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -28,6 +30,7 @@ DEFAULT_ROOT = REPO_ROOT / "experiments/ism/saijou_all_genes_10bp_scan"
 DEFAULT_GTF = (
     "/work/Database/Database_fromDocker/Referencedata_mm10/gtf_chrUCSC/chr.gtf"
 )
+DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent / "configs"
 MODELS = {
     "AlphaGenome e19": "runs/alphagenome_finetuned",
     "Borzoi e39": "runs/borzoi_finetuned",
@@ -43,12 +46,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-centers-per-segment", type=int, default=20)
     parser.add_argument("--candidate-quantile", type=float, default=0.95)
     parser.add_argument(
+        "--analysis-profile",
+        choices=("canonical_hsc", "cross_model_track"),
+        default="canonical_hsc",
+        help="Reuse this entry point with either the maintained HSC ranking or the generic fixed-track score.",
+    )
+    parser.add_argument(
+        "--positive-control-registry",
+        type=Path,
+        default=DEFAULT_CONFIG_DIR / "positive_control_registry.tsv",
+    )
+    parser.add_argument(
+        "--transcript-authority",
+        type=Path,
+        default=None,
+    )
+    parser.add_argument("--reference-bins", type=int, default=10)
+    parser.add_argument("--readout-role", default="gene_body_output_clipped")
+    parser.add_argument("--score-threshold", type=float, default=95.0)
+    parser.add_argument("--max-center-gap-bp", type=int, default=4)
+    parser.add_argument("--top-regions-per-gene", type=int, default=3)
+    parser.add_argument(
         "--splice-buffer-bp",
         type=int,
-        default=6,
+        default=None,
         help=(
             "Protect the annotated boundary plus extended core splice grammar. "
-            "With a 10-bp edit this excludes centers within 11 bp of a boundary."
+            "Defaults to 6 for canonical_hsc and 2 for cross_model_track."
         ),
     )
     return parser.parse_args()
@@ -269,6 +293,24 @@ def prepare_original_manifest(
 def main() -> None:
     args = parse_args()
     root = args.root.resolve()
+    if args.analysis_profile == "cross_model_track":
+        run_cross_model_track_analysis(
+            root=root,
+            gtf=Path(args.gtf),
+            positive_control_registry=args.positive_control_registry,
+            reference_bins_count=args.reference_bins,
+            readout_role=args.readout_role,
+            score_threshold=args.score_threshold,
+            max_center_gap_bp=args.max_center_gap_bp,
+            top_regions_per_gene=args.top_regions_per_gene,
+            splice_buffer_bp=(
+                2 if args.splice_buffer_bp is None else args.splice_buffer_bp
+            ),
+            transcript_authority=args.transcript_authority,
+        )
+        return
+    if args.splice_buffer_bp is None:
+        args.splice_buffer_bp = 6
     prepared = root / "prepared"
     analysis = root / "analysis"
     analysis.mkdir(parents=True, exist_ok=True)

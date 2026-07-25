@@ -9,7 +9,10 @@ if str(SAIJOU_DIR) not in sys.path:
     sys.path.insert(0, str(SAIJOU_DIR))
 
 from grelu.interpret.ism.mutations import AnchoredScan, ScanEdit, ScanExclusion  # noqa: E402
-from tools.genomics import TRANSCRIPT_OVERRIDES  # noqa: E402
+from tools.genomics import (  # noqa: E402
+    TRANSCRIPT_OVERRIDES,
+    load_transcript_overrides,
+)
 from tools.manifests import (  # noqa: E402
     ManifestLocus,
     interval_mutation_id,
@@ -167,10 +170,21 @@ def test_standard_readout_row_centres_on_its_anchor():
     assert row["end"] - row["start"] == 1024
 
 
-def test_acta2_transcript_override_has_a_single_definition():
+def test_supplied_nine_gene_transcripts_have_a_single_definition():
     # The preparers scan around the TSS this picks and the analysis annotates
     # against the transcript this picks; a second copy would let them diverge.
     assert TRANSCRIPT_OVERRIDES == {"Acta2": "ENSMUST00000238147"}
+    assert load_transcript_overrides() == {
+        "Mdk": "ENSMUST00000028672",
+        "Acta2": "ENSMUST00000039631",
+        "Col1a1": "ENSMUST00000001547",
+        "Col1a2": "ENSMUST00000031668",
+        "Timp1": "ENSMUST00000115342",
+        "Vegfc": "ENSMUST00000033919",
+        "Hgf": "ENSMUST00000199581",
+        "Igf1": "ENSMUST00000095360",
+        "Ngf": "ENSMUST00000106925",
+    }
 
     preparer = (SAIJOU_DIR / "prepare_saijou_all_genes_10bp_scan.py").read_text()
     assert "ENSMUST" not in preparer
