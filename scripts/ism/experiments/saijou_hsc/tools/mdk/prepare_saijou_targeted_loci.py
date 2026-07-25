@@ -16,15 +16,29 @@ REPO_ROOT = Path(__file__).resolve().parents[6]
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from grelu.interpret.ism.mutations import strict_unique_shuffles  # noqa: E402
+from grelu.interpret.ism.mutations import AnchoredScan, strict_unique_shuffles  # noqa: E402
 
 if __package__:
     from ..genomics import centered_interval, observed_peak
+    from ..manifests import (
+        ManifestLocus,
+        interval_mutation_id,
+        readout_row,
+        standard_readout_row,
+        strict_shuffle_mutation_row,
+    )
 else:
     SAIJOU_DIR = Path(__file__).resolve().parents[2]
     if str(SAIJOU_DIR) not in sys.path:
         sys.path.insert(0, str(SAIJOU_DIR))
     from tools.genomics import centered_interval, observed_peak
+    from tools.manifests import (
+        ManifestLocus,
+        interval_mutation_id,
+        readout_row,
+        standard_readout_row,
+        strict_shuffle_mutation_row,
+    )
 
 DEFAULT_FASTA = "/work/Database/Database_fromDocker/Referencedata_mm10/genome.fa"
 DEFAULT_HSC_BIGWIG = (
@@ -161,79 +175,45 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def tx_offset(position: int, gene: dict) -> int:
-    genomic = int(position) - int(gene["analysis_tss"])
-    return genomic if gene["strand"] == "+" else -genomic
+def _gene_scan(template: dict, gene: dict) -> AnchoredScan:
+    return AnchoredScan(
+        locus_id=template["locus_id"],
+        chrom=gene["chrom"],
+        anchor=int(gene["analysis_tss"]),
+        strand=gene["strand"],
+    )
 
 
-def _template_centers(template: dict, gene: dict) -> list[int]:
+def _template_centers(template: dict, scan: AnchoredScan) -> list[int]:
     centers = template.get("centers")
     if centers is not None:
         return centers
     edit_start = int(template["edit_start"])
     edit_end = int(template["edit_end"])
-    return [tx_offset(edit_start + (edit_end - edit_start) // 2, gene)]
+    return [scan.tx_offset(edit_start + (edit_end - edit_start) // 2)]
 
 
-def _edit_interval(template: dict, gene: dict, center_offset: int) -> tuple[int, int]:
+def _edit_interval(template: dict, scan: AnchoredScan, center_offset: int) -> tuple[int, int]:
     if "edit_start" in template:
         return int(template["edit_start"]), int(template["edit_end"])
-    genomic_center = (
-        int(gene["analysis_tss"]) + int(center_offset)
-        if gene["strand"] == "+"
-        else int(gene["analysis_tss"]) - int(center_offset)
-    )
-    edit_start = genomic_center - int(template["span_bp"]) // 2
+    edit_start = scan.genomic_center(center_offset) - int(template["span_bp"]) // 2
     return edit_start, edit_start + int(template["span_bp"])
 
 
-def _mutation_record(
-    template: dict,
-    gene: dict,
-    *,
-    edit_start: int,
-    edit_end: int,
-    ref: str,
-    alt: str,
-    replicate: int,
-) -> dict[str, object]:
-    edit_center = edit_start + (edit_end - edit_start) // 2
-    return {
-        "mutation_id": (
-            f"{template['locus_id']}__{edit_start}_{edit_end}"
-            f"__shuffle_rep{replicate:02d}"
-        ),
-        "locus_id": template["locus_id"],
-        "locus_role": template["role"],
-        "gene": gene["gene"],
-        "chrom": gene["chrom"],
-        "gene_strand": gene["strand"],
-        "gene_tss": gene["analysis_tss"],
-        "gene_tes": gene["tes"],
-        "edit_start": edit_start,
-        "edit_end": edit_end,
-        "edit_center_position": edit_center,
-        "edit_length_bp": edit_end - edit_start,
-        "ref_sequence": ref,
-        "alt_sequence": alt,
-        "mutation_kind": "strict_mononucleotide_shuffle",
-        "replacement_mode": "strict_shuffle",
-        "replacement_replicate": replicate,
-        "variant_position": edit_center,
-        "variant_offset_from_tss_genomic_bp": edit_center - int(gene["analysis_tss"]),
-        "variant_offset_from_tss_transcription_bp": tx_offset(edit_center, gene),
-        "ref_base": ref,
-        "alt_base": alt,
-        "control_type": "experimental",
-        "source": template["evidence"],
-    }
-
-
 def _prepare_locus(fasta, template: dict, gene: dict, seed: int) -> tuple[dict, list[dict]]:
+    scan = _gene_scan(template, gene)
+    locus_vocabulary = ManifestLocus(
+        scan=scan,
+        locus_role=template["role"],
+        gene=gene["gene"],
+        tes=gene["tes"],
+        control_type="experimental",
+        source=template["evidence"],
+    )
     intervals = []
     mutations = []
-    for center_offset in _template_centers(template, gene):
-        edit_start, edit_end = _edit_interval(template, gene, center_offset)
+    for center_offset in _template_centers(template, scan):
+        edit_start, edit_end = _edit_interval(template, scan, center_offset)
         intervals.append((edit_start, edit_end))
         ref = str(fasta[gene["chrom"]][edit_start:edit_end]).upper()
         if len(ref) != int(template["span_bp"]):
@@ -245,13 +225,18 @@ def _prepare_locus(fasta, template: dict, gene: dict, seed: int) -> tuple[dict, 
             mutation_key=f"{template['locus_id']}:{edit_start}:{edit_end}",
         )
         mutations.extend(
-            _mutation_record(
-                template,
-                gene,
+            strict_shuffle_mutation_row(
+                locus_vocabulary,
+                mutation_id=interval_mutation_id(
+                    locus_vocabulary,
+                    edit_start=edit_start,
+                    edit_end=edit_end,
+                    replicate=replicate,
+                ),
                 edit_start=edit_start,
                 edit_end=edit_end,
-                ref=ref,
-                alt=alt,
+                ref_sequence=ref,
+                alt_sequence=alt,
                 replicate=replicate,
             )
             for replicate, alt in enumerate(alternates)
@@ -295,17 +280,13 @@ def _prepare_mutation_tables(
 def _standard_readout(
     gene: dict, role: str, center: int, width: int
 ) -> dict[str, object]:
-    start, end = centered_interval(center, width)
-    return {
-        "readout_id": f"{gene['gene']}__{role}_{width}bp",
-        "gene": gene["gene"],
-        "locus_id": "*",
-        "chrom": gene["chrom"],
-        "start": start,
-        "end": end,
-        "anchor": center,
-        "role": role,
-    }
+    return standard_readout_row(
+        gene=gene["gene"],
+        chrom=gene["chrom"],
+        role=role,
+        center=center,
+        width_bp=width,
+    )
 
 
 def _gene_readouts(gene: dict, args: argparse.Namespace) -> list[dict]:
@@ -321,16 +302,15 @@ def _gene_readouts(gene: dict, args: argparse.Namespace) -> list[dict]:
         row["role"] = "hsc_observed_peak"
         rows.append(row)
     rows.append(
-        {
-            "readout_id": f"{gene['gene']}__gene_body",
-            "gene": gene["gene"],
-            "locus_id": "*",
-            "chrom": gene["chrom"],
-            "start": gene["start"],
-            "end": gene["end"],
-            "anchor": gene["analysis_tss"],
-            "role": "gene_body",
-        }
+        readout_row(
+            readout_id=f"{gene['gene']}__gene_body",
+            gene=gene["gene"],
+            chrom=gene["chrom"],
+            start=gene["start"],
+            end=gene["end"],
+            anchor=gene["analysis_tss"],
+            role="gene_body",
+        )
     )
     return rows
 
@@ -344,16 +324,16 @@ def _build_readouts(
             locus["local_readout_center"], args.local_readout_bp
         )
         rows.append(
-            {
-                "readout_id": f"{locus['locus_id']}__local_{args.local_readout_bp}bp",
-                "gene": locus["gene"],
-                "locus_id": locus["locus_id"],
-                "chrom": locus["chrom"],
-                "start": start,
-                "end": end,
-                "anchor": locus["local_readout_center"],
-                "role": "local_edit",
-            }
+            readout_row(
+                readout_id=f"{locus['locus_id']}__local_{args.local_readout_bp}bp",
+                gene=locus["gene"],
+                locus_id=locus["locus_id"],
+                chrom=locus["chrom"],
+                start=start,
+                end=end,
+                anchor=locus["local_readout_center"],
+                role="local_edit",
+            )
         )
     return pd.DataFrame.from_records(rows)
 

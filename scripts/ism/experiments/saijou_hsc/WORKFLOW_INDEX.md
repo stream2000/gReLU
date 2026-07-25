@@ -36,7 +36,32 @@ index. Reusable or specialist code lives under `tools/`:
   helpers. Artifact assembly and print finalization stay in the report entry
   point because they are part of one delivery operation.
 - `tools/finalize_saijou_sharded_run.py`: distributed-run assembly.
+- `tools/effect_summary.py`: shared signed-effect and fixed-readout summaries
+  used by both the nine-gene report and focused Mdk analysis.
+- `tools/harness.py`: path, schema, key, finiteness, and JSON contracts.
 - `tools/mdk/`: focused Mdk audit tools outside the canonical nine-gene path.
+
+- `tools/manifests.py`: the strict-shuffle mutation manifest schema, its two
+  mutation-id shapes, and the excluded-window table.
+
+Neither sequence editing nor the manifest schema is per-preparer code. The three
+strict-shuffle preparers — `prepare_saijou_all_genes_10bp_scan.py`,
+`tools/mdk/prepare_mdk_specificity_background.py` and
+`tools/mdk/prepare_saijou_targeted_loci.py` — take scan geometry and
+replacements from `grelu.interpret.ism.mutations` (`AnchoredScan`,
+`anchored_scan_centers`, `scan_anchored_strict_shuffles`) and their 24-column
+rows from `tools/manifests.py`. They own only their locus vocabulary and how
+their edits are chosen. A new preparer should call both rather than re-derive
+centers, re-implement the strand-aware offset mapping, re-handle homopolymer
+exclusion, or restate the manifest columns.
+
+One deliberate exception: `tools/genomics.py::add_genomic_annotation` mirrors
+`AnchoredScan.genomic_center` instead of calling it, because
+`analyze_saijou_all_genes_10bp_scan.py` imports that module without putting
+`src/` on `sys.path` and must not gain a `grelu` dependency for one expression.
+
+See `ANALYSIS_HARNESS.md` for the required analysis/report boundary and the
+promotion rules for new experimental work.
 
 ## Retained Mdk audit workflow
 
@@ -50,10 +75,22 @@ background evidence:
 - `tools/mdk/analyze_mdk_cell_specificity_deep_dive.py`
 - `tools/mdk/analyze_mdk_motif_disruption.py`
 - `tools/mdk/build_mdk_cell_specificity_report.py`
+- `tools/mdk/analyze_mdk_audited_effects.py`: raw feature artifacts to audited
+  TSV/JSON tables for the focused single-gene discussion.
+- `tools/mdk/build_mdk_audited_report.py`: report-only renderer; it reads the
+  audited tables and external templates under `tools/mdk/templates/`.
 
 These scripts may read the earlier
 `experiments/ism/saijou_targeted_original_comparison/` results, but inference
 still goes through the canonical `run_saijou_targeted_ism.py` CLI.
+
+## Experimental work
+
+Unvalidated investigations live under `experimental/<topic>/` and are not
+part of the maintained baseline. Nothing in the canonical or retained Mdk
+workflows may import from `experimental/`. Promotion requires a declared metric
+contract, schema/finite/key checks, synthetic tests, saved-artifact validation,
+and an update to this index.
 
 ## Ignored archive
 

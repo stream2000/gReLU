@@ -313,6 +313,33 @@ Initial implementations:
   - enumerates every non-reference SNV in each window.
   - mandatory FASTA REF validation.
 
+- `AnchoredStrictShuffleScan` (implemented 2026-07-16 as `AnchoredScan` plus
+  `anchored_scan_centers` and `scan_anchored_strict_shuffles` in `mutations.py`)
+
+  A strand-aware scan of same-length windows tiling `±half_window_bp` around one
+  anchor, where each window is replaced by `n` *mutually distinct*
+  composition-preserving shuffles. It differs from
+  `SlidingWindowReplacementGenerator` on two axes that turned out to matter:
+
+  - uniqueness is a property across replicates, not of one replacement, so it
+    cannot be expressed as another `replacement_sequence` mode. It builds on
+    `strict_unique_shuffles`, not on `replacement_sequence`.
+  - offsets are transcription-relative, so the generator — not each plugin —
+    owns the minus-strand mapping called out under "TSS-relative coordinates
+    must be strand-aware" above.
+
+  A window whose reference has one distinct base admits no
+  composition-preserving replacement. The scan returns it as a `ScanExclusion`
+  rather than raising, so a scan reports its own coverage instead of aborting on
+  a homopolymer. Mdk loses 11 of 508 centers this way.
+
+  The scan returns lightweight `ScanEdit`/`ScanExclusion` records and leaves
+  manifest projection to the caller: mutation-id shape, `control_type`, `source`
+  and offset columns are plugin vocabulary, not core vocabulary. The mutation
+  key `{locus_id}:{tx_offset}:{edit_start}:{edit_end}` seeds the replacement RNG
+  and is quoted verbatim in exclusion reasons that prepared artifacts record, so
+  it is a stable contract rather than an implementation detail.
+
 - `ExplicitEditGenerator`
   - normalizes an existing mutation table.
   - useful for MREG curated motif perturbations and ranked re-profiling.
@@ -324,6 +351,20 @@ Initial implementations:
 The core framework should treat saturation SNV enumeration as the default
 primitive. Motif disruption is a special case of mutation generation, not the
 center of the framework.
+
+Generators own sequence geometry and replacement determinism only. Anything a
+reader would have to know the experiment to predict — which genes, which track,
+what a locus is called, what a manifest column means — belongs to the plugin.
+The test for a candidate core generator is whether a second experiment would
+call it unchanged; `scan_anchored_strict_shuffles` qualified because two
+plugins had already open-coded it identically.
+
+"Belongs to the plugin" is not the same as "may be duplicated per plugin". The
+manifest schema those generators feed is experiment vocabulary and correctly
+stays out of core, but three Saijou preparers were each defining it, so it lives
+once in `scripts/ism/experiments/saijou_hsc/tools/manifests.py`. Core is shared
+across experiments; `tools/` is shared within one. A duplicate has to land in
+one of them.
 
 ### Layer 3: Model Adapters
 

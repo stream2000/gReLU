@@ -9,6 +9,11 @@ import numpy as np
 import pandas as pd
 
 
+# Genes whose gene-level TSS is not the biologically relevant promoter. Acta2's
+# proximal CArG sites fall outside a 1 kb window around the gene-level TSS.
+# The preparers scan around the TSS this picks and the analysis annotates against
+# the transcript this picks, so the two stages must read one definition: a split
+# copy would leave both stages internally consistent and silently disagreeing.
 TRANSCRIPT_OVERRIDES = {"Acta2": "ENSMUST00000238147"}
 GTF_COLUMNS = (
     "chrom",
@@ -210,7 +215,12 @@ def add_genomic_annotation(
     splice_buffer_bp: int,
     transcript_features: dict[str, dict[str, list[tuple[int, int]]]] | None = None,
 ) -> pd.DataFrame:
-    """Annotate each scanned edit center with transcript and splice context."""
+    """Annotate each scanned edit center with transcript and splice context.
+
+    This mirrors ``AnchoredScan.genomic_center`` rather than calling it: this
+    module is imported by entry points that have no ``grelu`` bootstrap on
+    ``sys.path``, so it must not depend on core at import or call time.
+    """
 
     gene_map = genes.set_index("gene").to_dict("index")
     rows = []

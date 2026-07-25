@@ -155,6 +155,152 @@ def strict_unique_shuffles(
     )
 
 
+@dataclass(frozen=True)
+class AnchoredScan:
+    """A strand-aware scan of same-length windows around one anchor.
+
+    Offsets are transcription-relative: positive is downstream of ``anchor``
+    on either strand. Genomic coordinates always increase left to right, so on
+    the minus strand a positive offset maps to a smaller coordinate.
+    """
+
+    locus_id: str
+    chrom: str
+    anchor: int
+    strand: str = "+"
+
+    def __post_init__(self) -> None:
+        if self.strand not in ("+", "-"):
+            raise ValueError(f"Strand must be '+' or '-', got {self.strand!r}")
+
+    @property
+    def direction(self) -> int:
+        return 1 if self.strand == "+" else -1
+
+    def genomic_center(self, tx_offset: int) -> int:
+        """Map a transcription-relative offset onto a genomic coordinate."""
+
+        return int(self.anchor) + self.direction * int(tx_offset)
+
+    def tx_offset(self, position: int) -> int:
+        """Map a genomic coordinate onto a transcription-relative offset.
+
+        Inverse of :meth:`genomic_center` on both strands.
+        """
+
+        return self.direction * (int(position) - int(self.anchor))
+
+
+@dataclass(frozen=True)
+class ScanEdit:
+    """One scanned window and its composition-preserving replacements."""
+
+    tx_offset: int
+    genomic_center: int
+    edit_start: int
+    edit_end: int
+    ref_sequence: str
+    alt_sequences: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ScanExclusion:
+    """One scanned window that admits no composition-preserving replacement."""
+
+    tx_offset: int
+    genomic_center: int
+    edit_start: int
+    edit_end: int
+    ref_sequence: str
+    reason: str
+
+
+def anchored_scan_centers(
+    *, half_window_bp: int, span_bp: int, stride_bp: int
+) -> list[int]:
+    """Return transcription-relative edit centers tiling one anchored window.
+
+    Centers are inset by half a span so every edit stays within
+    ``half_window_bp`` of the anchor.
+    """
+
+    half_window_bp = int(half_window_bp)
+    span_bp = int(span_bp)
+    stride_bp = int(stride_bp)
+    if span_bp <= 0:
+        raise ValueError(f"span_bp must be positive, got {span_bp}")
+    if span_bp % 2:
+        raise ValueError(f"span_bp must be even so centers are unambiguous, got {span_bp}")
+    if stride_bp <= 0:
+        raise ValueError(f"stride_bp must be positive, got {stride_bp}")
+    if span_bp > 2 * half_window_bp:
+        raise ValueError(
+            f"span_bp {span_bp} exceeds the {2 * half_window_bp} bp scan window"
+        )
+    inset = span_bp // 2
+    return list(range(-half_window_bp + inset, half_window_bp - inset + 1, stride_bp))
+
+
+def scan_anchored_strict_shuffles(
+    *,
+    fasta,
+    scan: AnchoredScan,
+    centers: Iterable[int],
+    span_bp: int,
+    replicates: int,
+    seed: int,
+) -> tuple[list[ScanEdit], list[ScanExclusion]]:
+    """Strict-shuffle every centered window of a strand-aware anchored scan.
+
+    A window whose reference has a single distinct base cannot be shuffled into
+    anything else, so it is returned as an exclusion instead of raising. This
+    lets a scan report its own coverage rather than abort on a homopolymer.
+
+    Callers project the returned records onto their own manifest schema; the
+    scan owns only sequence geometry and replacement determinism.
+    """
+
+    span_bp = int(span_bp)
+    if span_bp <= 0:
+        raise ValueError(f"span_bp must be positive, got {span_bp}")
+    edits: list[ScanEdit] = []
+    exclusions: list[ScanExclusion] = []
+    for tx_offset in centers:
+        tx_offset = int(tx_offset)
+        genomic_center = scan.genomic_center(tx_offset)
+        edit_start = genomic_center - span_bp // 2
+        edit_end = edit_start + span_bp
+        ref = fasta.extract(scan.chrom, edit_start, edit_end).upper()
+        mutation_key = f"{scan.locus_id}:{tx_offset}:{edit_start}:{edit_end}"
+        try:
+            alternates = strict_unique_shuffles(
+                ref, n=replicates, seed=seed, mutation_key=mutation_key
+            )
+        except ValueError as exc:
+            exclusions.append(
+                ScanExclusion(
+                    tx_offset=tx_offset,
+                    genomic_center=genomic_center,
+                    edit_start=edit_start,
+                    edit_end=edit_end,
+                    ref_sequence=ref,
+                    reason=str(exc),
+                )
+            )
+            continue
+        edits.append(
+            ScanEdit(
+                tx_offset=tx_offset,
+                genomic_center=genomic_center,
+                edit_start=edit_start,
+                edit_end=edit_end,
+                ref_sequence=ref,
+                alt_sequences=tuple(alternates),
+            )
+        )
+    return edits, exclusions
+
+
 def enumerate_sliding_window_replacements(
     *,
     fasta,

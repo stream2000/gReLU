@@ -45,9 +45,9 @@ def grouped_horizontal_bars(
     import matplotlib.pyplot as plt
     import numpy as np
 
-    pivot = table.pivot(
-        index="segment_label", columns="model", values=value
-    ).reindex(labels)
+    pivot = table.pivot(index="segment_label", columns="model", values=value).reindex(
+        labels
+    )
     fig, ax = plt.subplots(figsize=(8.8, 3.0))
     y = np.arange(len(labels))
     height = 0.36
@@ -56,9 +56,7 @@ def grouped_horizontal_bars(
             y + (index - 0.5) * height,
             pivot[model].to_numpy(),
             height=height,
-            label=model.replace(" fine-tuned", "-FT").replace(
-                " original", "-original"
-            ),
+            label=model.replace(" fine-tuned", "-FT").replace(" original", "-original"),
             color=MODEL_COLORS[index],
         )
     ax.set_yticks(y, labels)
@@ -129,6 +127,58 @@ def mdk_robustness_figure(mdk_centers: pd.DataFrame):
     return fig
 
 
+def nine_gene_signed_browser(browser: pd.DataFrame):
+    """Build a compact nine-gene view of direct signed HSC effect sizes."""
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    genes = sorted(browser.gene.unique())
+    fig, axes = plt.subplots(3, 3, figsize=(8.8, 7.1), sharex=True)
+    style = {
+        "AlphaGenome fine-tuned": (MODEL_COLORS[0], "-"),
+        "Borzoi fine-tuned": (MODEL_COLORS[1], "--"),
+    }
+    for axis, gene in zip(axes.flat, genes):
+        gene_data = browser.loc[browser.gene.eq(gene)]
+        limit = max(0.05, float(gene_data.median_signed_effect.abs().max()) * 1.08)
+        for model, model_data in gene_data.groupby("model_label", sort=False):
+            model_data = model_data.sort_values(
+                "variant_offset_from_tss_transcription_bp"
+            )
+            color, linestyle = style[model]
+            axis.plot(
+                model_data.variant_offset_from_tss_transcription_bp,
+                model_data.signed_effect_smoothed,
+                color=color,
+                linestyle=linestyle,
+                linewidth=1.15,
+                label=model.replace(" fine-tuned", "-FT"),
+            )
+        axis.axhline(0, color="#555", linewidth=0.55)
+        axis.axvline(0, color="#777", linewidth=0.5, linestyle=":")
+        axis.set_ylim(-limit, limit)
+        axis.set_title(gene, loc="left", fontweight="bold", fontsize=8.5)
+        axis.grid(axis="y", color="#e8e8e8", linewidth=0.4)
+        axis.tick_params(labelsize=6.5)
+    for axis in axes[-1]:
+        axis.set_xlabel("TSS offset (bp)")
+    for axis in axes[:, 0]:
+        axis.set_ylabel("signed log2FC")
+    handles, labels = axes.flat[0].get_legend_handles_labels()
+    fig.legend(handles, labels, frameon=False, ncol=2, loc="upper center")
+    fig.suptitle(
+        "Nine-gene HSC Browser: direct signed effect (gene-specific symmetric scales)",
+        x=0.02,
+        y=0.995,
+        ha="left",
+        fontsize=10,
+        fontweight="bold",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.965), pad=0.8)
+    return fig
+
+
 def build_all_genes_static_figures(
     report_dir: Path,
     overview: pd.DataFrame,
@@ -136,6 +186,7 @@ def build_all_genes_static_figures(
     fine_matrix: pd.DataFrame,
     mdk_centers: pd.DataFrame,
     original_top: pd.DataFrame,
+    fine_signed_browser: pd.DataFrame,
 ) -> dict[str, str]:
     """Build all print-stable figures for the nine-gene report."""
 
@@ -143,6 +194,7 @@ def build_all_genes_static_figures(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+
     plt.rcParams.update(
         {
             "font.family": "DejaVu Sans",
@@ -195,6 +247,11 @@ def build_all_genes_static_figures(
 
     static["mdk_robustness"] = save_svg(
         mdk_robustness_figure(mdk_centers), figure_dir / "mdk_robustness.svg"
+    )
+    static["fine_signed_browser"] = save_svg(
+        nine_gene_signed_browser(fine_signed_browser),
+        figure_dir / "fine_signed_browser.svg",
+        height_px=610,
     )
     for index, labels in enumerate(panels, start=1):
         figure = grouped_horizontal_bars(

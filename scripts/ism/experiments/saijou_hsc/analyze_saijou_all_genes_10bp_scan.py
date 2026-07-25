@@ -11,24 +11,30 @@ import numpy as np
 import pandas as pd
 
 if __package__:
+    from .tools.effect_summary import strongest_signed_profile
     from .tools.genomics import (
         add_genomic_annotation,
         load_gtf_annotations,
     )
     from .tools.candidates import cluster_candidates
 else:
+    from tools.effect_summary import strongest_signed_profile
     from tools.genomics import add_genomic_annotation, load_gtf_annotations
     from tools.candidates import cluster_candidates
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_ROOT = REPO_ROOT / "experiments/ism/saijou_all_genes_10bp_scan"
-DEFAULT_GTF = "/work/Database/Database_fromDocker/Referencedata_mm10/gtf_chrUCSC/chr.gtf"
+DEFAULT_GTF = (
+    "/work/Database/Database_fromDocker/Referencedata_mm10/gtf_chrUCSC/chr.gtf"
+)
 MODELS = {
     "AlphaGenome e19": "runs/alphagenome_finetuned",
     "Borzoi e39": "runs/borzoi_finetuned",
 }
 CELLS = ["hsc", "mac", "lsec", "chol"]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -79,19 +85,34 @@ def center_scores(data: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
     wide = center_cell.pivot_table(
-        index=["model", "gene", "readout_role", "variant_offset_from_tss_transcription_bp"],
+        index=[
+            "model",
+            "gene",
+            "readout_role",
+            "variant_offset_from_tss_transcription_bp",
+        ],
         columns="cell_type",
         values="median_abs_effect",
     ).reset_index()
     signed = center_cell.pivot_table(
-        index=["model", "gene", "readout_role", "variant_offset_from_tss_transcription_bp"],
+        index=[
+            "model",
+            "gene",
+            "readout_role",
+            "variant_offset_from_tss_transcription_bp",
+        ],
         columns="cell_type",
         values="median_signed_effect",
     ).reset_index()
     signed = signed.rename(columns={cell: f"{cell}_signed_effect" for cell in CELLS})
     wide = wide.merge(
         signed,
-        on=["model", "gene", "readout_role", "variant_offset_from_tss_transcription_bp"],
+        on=[
+            "model",
+            "gene",
+            "readout_role",
+            "variant_offset_from_tss_transcription_bp",
+        ],
         how="left",
         validate="one_to_one",
     )
@@ -104,9 +125,9 @@ def center_scores(data: pd.DataFrame) -> pd.DataFrame:
     wide["hsc_ratio"] = wide.hsc / wide.max_other_effect.clip(lower=1e-12)
     wide["top_cell"] = wide[CELLS].idxmax(axis=1)
     for field in ["generic_effect", "hsc_margin", "hsc_ratio"]:
-        wide[f"{field}_percentile"] = wide.groupby(
-            ["model", "gene", "readout_role"]
-        )[field].rank(method="average", pct=True)
+        wide[f"{field}_percentile"] = wide.groupby(["model", "gene", "readout_role"])[
+            field
+        ].rank(method="average", pct=True)
     return wide
 
 
@@ -131,9 +152,7 @@ def combined_center_scores(scores: pd.DataFrame) -> pd.DataFrame:
                 "ag_hsc_signed_effect": by_model.loc[
                     "AlphaGenome e19", "hsc_signed_effect"
                 ],
-                "bz_hsc_signed_effect": by_model.loc[
-                    "Borzoi e39", "hsc_signed_effect"
-                ],
+                "bz_hsc_signed_effect": by_model.loc["Borzoi e39", "hsc_signed_effect"],
                 "ag_hsc_ratio": by_model.loc["AlphaGenome e19", "hsc_ratio"],
                 "bz_hsc_ratio": by_model.loc["Borzoi e39", "hsc_ratio"],
                 "ag_top_cell": by_model.loc["AlphaGenome e19", "top_cell"],
@@ -212,7 +231,9 @@ def prepare_original_manifest(
     loci["analysis_tss"] = loci.gene.map(selected_genes.set_index("gene").analysis_tss)
     loci["chrom"] = loci.gene.map(selected_genes.set_index("gene").chrom)
     loci["strand"] = loci.gene.map(selected_genes.set_index("gene").strand)
-    loci["tx_span"] = loci.apply(lambda r: f"{int(r.tx_start):+d}..{int(r.tx_end):+d}", axis=1)
+    loci["tx_span"] = loci.apply(
+        lambda r: f"{int(r.tx_start):+d}..{int(r.tx_end):+d}", axis=1
+    )
     loci["span_bp"] = 10
     loci["replicates"] = 3
     loci["evidence"] = loci.peak_discovery_class
@@ -226,13 +247,22 @@ def prepare_original_manifest(
         "segments": int(len(segments)),
         "selected_centers": int(len(keys)),
         "mutations": int(len(manifest)),
-        "replicates_per_center": sorted(manifest.replacement_replicate.unique().tolist()),
+        "replicates_per_center": sorted(
+            manifest.replacement_replicate.unique().tolist()
+        ),
         "duplicate_mutation_ids": int(manifest.mutation_id.duplicated().sum()),
-        "splice_overlapping_selected_centers": int(candidate_centers.overlaps_splice_site.sum()),
+        "splice_overlapping_selected_centers": int(
+            candidate_centers.overlaps_splice_site.sum()
+        ),
     }
-    if validation["duplicate_mutation_ids"] or validation["splice_overlapping_selected_centers"]:
+    if (
+        validation["duplicate_mutation_ids"]
+        or validation["splice_overlapping_selected_centers"]
+    ):
         raise RuntimeError(validation)
-    (out / "validation_summary.json").write_text(json.dumps(validation, indent=2) + "\n")
+    (out / "validation_summary.json").write_text(
+        json.dumps(validation, indent=2) + "\n"
+    )
     return validation
 
 
@@ -253,7 +283,9 @@ def main() -> None:
         transcript_metadata,
     ) = load_gtf_annotations(args.gtf, genes)
 
-    model_data = [read_model_features(root, model, relpath) for model, relpath in MODELS.items()]
+    model_data = [
+        read_model_features(root, model, relpath) for model, relpath in MODELS.items()
+    ]
     data = pd.concat(model_data, ignore_index=True)
     scores = center_scores(data)
     combined = combined_center_scores(scores)
@@ -272,9 +304,25 @@ def main() -> None:
         candidate_quantile=args.candidate_quantile,
     )
     scores.to_csv(analysis / "model_center_scores.tsv", sep="\t", index=False)
-    annotated.to_csv(analysis / "combined_center_scores_annotated.tsv", sep="\t", index=False)
+    annotated.to_csv(
+        analysis / "combined_center_scores_annotated.tsv", sep="\t", index=False
+    )
     segments.to_csv(analysis / "candidate_segments.tsv", sep="\t", index=False)
     candidates.to_csv(analysis / "candidate_centers.tsv", sep="\t", index=False)
+    browser = pd.concat(
+        [
+            strongest_signed_profile(
+                root / relpath / "features/combined_mutation_features.parquet",
+                model_label=model.replace(" e19", " fine-tuned").replace(
+                    " e39", " fine-tuned"
+                ),
+                genes=genes.gene.tolist(),
+            )
+            for model, relpath in MODELS.items()
+        ],
+        ignore_index=True,
+    )
+    browser.to_csv(analysis / "fine_signed_browser.tsv", sep="\t", index=False)
     pd.DataFrame(
         [{"gene": gene, **transcript_metadata[gene]} for gene in genes.gene]
     ).to_csv(analysis / "representative_transcripts.tsv", sep="\t", index=False)
@@ -287,9 +335,12 @@ def main() -> None:
             "combined_annotated_rows": int(len(annotated)),
             "splice_overlapping_center_rows": int(annotated.overlaps_splice_site.sum()),
             "candidate_segments_per_gene": segments.groupby("gene").size().to_dict(),
+            "fine_signed_browser_rows": int(len(browser)),
         }
     )
-    (analysis / "validation_summary.json").write_text(json.dumps(validation, indent=2) + "\n")
+    (analysis / "validation_summary.json").write_text(
+        json.dumps(validation, indent=2) + "\n"
+    )
     print(json.dumps(validation, indent=2))
 
 

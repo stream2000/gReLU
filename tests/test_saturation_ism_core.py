@@ -2,10 +2,13 @@ import pandas as pd
 import pytest
 
 from grelu.interpret.ism.mutations import (
+    AnchoredScan,
     SaturationWindow,
+    anchored_scan_centers,
     apply_equal_length_edit,
     enumerate_sliding_window_replacement_table,
     enumerate_snv_site_table,
+    scan_anchored_strict_shuffles,
     strict_unique_shuffles,
 )
 from grelu.interpret.ism.readouts import map_readouts_to_bins, summarize_profile_pair
@@ -72,6 +75,90 @@ def test_strict_unique_shuffles_are_deterministic_and_composition_preserving():
 
     with pytest.raises(ValueError, match="composition-preserving"):
         strict_unique_shuffles("AAAA", n=1, seed=23, mutation_key="homopolymer")
+
+
+def _scan_fasta():
+    return FakeFasta({"chr1": "ACGTACGTACGTACGT" + "AAAA" + "CGTA" + "ACGTACGTACGTACGT"})
+
+
+def test_anchored_scan_centers_inset_by_half_a_span():
+    centers = anchored_scan_centers(half_window_bp=512, span_bp=10, stride_bp=2)
+
+    assert len(centers) == 508
+    assert (centers[0], centers[-1]) == (-507, 507)
+    assert centers[0] - 10 // 2 == -512
+    assert centers[-1] + 10 // 2 == 512
+
+    with pytest.raises(ValueError, match="even"):
+        anchored_scan_centers(half_window_bp=512, span_bp=9, stride_bp=2)
+    with pytest.raises(ValueError, match="exceeds"):
+        anchored_scan_centers(half_window_bp=4, span_bp=10, stride_bp=2)
+
+
+def test_anchored_scan_maps_transcription_offsets_by_strand():
+    plus = AnchoredScan(locus_id="demo", chrom="chr1", anchor=20, strand="+")
+    minus = AnchoredScan(locus_id="demo", chrom="chr1", anchor=20, strand="-")
+
+    assert plus.genomic_center(3) == 23
+    assert minus.genomic_center(3) == 17
+
+    # tx_offset inverts genomic_center on both strands.
+    assert plus.tx_offset(23) == 3
+    assert minus.tx_offset(17) == 3
+    for scan in (plus, minus):
+        assert all(scan.tx_offset(scan.genomic_center(k)) == k for k in range(-5, 6))
+
+    with pytest.raises(ValueError, match="Strand"):
+        AnchoredScan(locus_id="demo", chrom="chr1", anchor=20, strand="?")
+
+
+def test_scan_anchored_strict_shuffles_excludes_homopolymers_and_is_deterministic():
+    scan = AnchoredScan(locus_id="demo", chrom="chr1", anchor=20, strand="+")
+    kwargs = dict(centers=[-2, 0, 2], span_bp=4, replicates=2, seed=23)
+
+    edits, exclusions = scan_anchored_strict_shuffles(fasta=_scan_fasta(), scan=scan, **kwargs)
+    repeat, _ = scan_anchored_strict_shuffles(fasta=_scan_fasta(), scan=scan, **kwargs)
+
+    assert [edit.alt_sequences for edit in edits] == [edit.alt_sequences for edit in repeat]
+    assert [edit.tx_offset for edit in edits] == [0, 2]
+    assert all(len(set(edit.alt_sequences)) == 2 for edit in edits)
+    assert all(edit.ref_sequence not in edit.alt_sequences for edit in edits)
+    assert all(
+        sorted(alt) == sorted(edit.ref_sequence)
+        for edit in edits
+        for alt in edit.alt_sequences
+    )
+
+    assert [exclusion.tx_offset for exclusion in exclusions] == [-2]
+    excluded = exclusions[0]
+    assert excluded.ref_sequence == "AAAA"
+    assert (excluded.edit_start, excluded.edit_end) == (16, 20)
+    # The mutation key seeds the replacement RNG and is quoted verbatim in the
+    # exclusion reason that prepared artifacts record, so its shape is a contract.
+    assert "demo:-2:16:20" in excluded.reason
+
+
+def test_scan_anchored_strict_shuffles_mirrors_windows_across_strands():
+    centers = [-2, 0, 2]
+    geometry = dict(centers=centers, span_bp=4, replicates=1, seed=23)
+
+    plus, plus_excluded = scan_anchored_strict_shuffles(
+        fasta=_scan_fasta(),
+        scan=AnchoredScan(locus_id="demo", chrom="chr1", anchor=20, strand="+"),
+        **geometry,
+    )
+    minus, minus_excluded = scan_anchored_strict_shuffles(
+        fasta=_scan_fasta(),
+        scan=AnchoredScan(locus_id="demo", chrom="chr1", anchor=20, strand="-"),
+        **geometry,
+    )
+
+    windows = {(edit.edit_start, edit.edit_end) for edit in plus}
+    assert windows == {(edit.edit_start, edit.edit_end) for edit in minus}
+    assert [edit.tx_offset for edit in plus] == [0, 2]
+    assert [edit.tx_offset for edit in minus] == [-2, 0]
+    assert plus_excluded[0].tx_offset == -2
+    assert minus_excluded[0].tx_offset == 2
 
 
 def test_enumerate_sliding_window_replacements_are_deterministic_equal_length_edits():

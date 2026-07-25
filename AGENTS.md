@@ -20,9 +20,10 @@ src/alphagenome_pytorch/
 tests/test_alphagenome_inference.py
 ```
 
-The separate `ism` branch has additional ISM/MREG/DIC work that has not been
-merged here yet. Do not assume `src/grelu/interpret/ism/` or the MREG ISM
-example runners exist in this checkout until that merge/cherry-pick is done.
+`src/grelu/interpret/ism/` now exists here: the saturation ISM core and the
+Saijou HSC plugin have landed. The MREG plugin and the DIC work have not, so do
+not assume the MREG example runners exist until that merge/cherry-pick is done.
+See `docs/saturation_ism_framework_design.md` for the intended layering.
 
 ## Environment
 
@@ -99,6 +100,33 @@ Record:
 
 Keep entries brief. If a later run corrects the same result, update the latest
 relevant entry instead of adding a correction-only note.
+
+## Report Artifacts
+
+Keep canonical report sources, analysis tables, figures, and the primary PDF in
+their project or experiment output directory. When a final deliverable includes
+a PDF, also copy that PDF to `/home/fqijun/report` (`~/report`) with a clear,
+descriptive filename so it is easy to find. Do not move or replace the canonical
+project artifact when making this convenience copy.
+
+## Saijou Analysis Harness
+
+For Saijou HSC ISM work, read
+`scripts/ism/experiments/saijou_hsc/WORKFLOW_INDEX.md` and
+`scripts/ism/experiments/saijou_hsc/ANALYSIS_HARNESS.md` before adding or
+moving analysis code. The maintained research baseline is the canonical
+nine-gene workflow plus the focused audited Mdk workflow.
+
+Keep model inference, reusable analysis, versioned analysis tables, and report
+rendering as separate layers. Report renderers must consume the validated
+TSV/JSON analysis interface rather than recomputing from raw parquet. Keep HTML
+and CSS in external templates rather than embedding large documents in Python.
+
+Unvalidated investigations belong under
+`scripts/ism/experiments/saijou_hsc/experimental/<topic>/`. They are research
+progress, not canonical evidence, and canonical or retained workflows must not
+import them. Promote code from `experimental/` only after its metric contract,
+schema checks, synthetic tests, and saved-artifact validation are documented.
 
 ## Current Branch Discussion
 

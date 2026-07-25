@@ -41,7 +41,9 @@ def segment_label(row: pd.Series) -> str:
     return f"{row.gene} {int(row.tx_start):+d}..{int(row.tx_end):+d}"
 
 
-def _read_report_inputs(root: Path) -> tuple[dict[str, pd.DataFrame], dict[str, object]]:
+def _read_report_inputs(
+    root: Path,
+) -> tuple[dict[str, pd.DataFrame], dict[str, object]]:
     analysis = root / "analysis"
     data_dir = analysis / "report_data"
     frames = {
@@ -50,9 +52,7 @@ def _read_report_inputs(root: Path) -> tuple[dict[str, pd.DataFrame], dict[str, 
         "original_group_matrix": pd.read_csv(
             data_dir / "original_group_matrix.tsv", sep="\t"
         ),
-        "motif_families": pd.read_csv(
-            data_dir / "motif_family_summary.tsv", sep="\t"
-        ),
+        "motif_families": pd.read_csv(data_dir / "motif_family_summary.tsv", sep="\t"),
         "controls": pd.read_csv(data_dir / "known_control_recovery.tsv", sep="\t"),
         "genes": pd.read_csv(data_dir / "gene_summary.tsv", sep="\t"),
         "transcripts": pd.read_csv(
@@ -66,6 +66,9 @@ def _read_report_inputs(root: Path) -> tuple[dict[str, pd.DataFrame], dict[str, 
         ),
         "mdk_concordance": pd.read_csv(
             analysis / "mdk_manifest_robustness/concordance.tsv", sep="\t"
+        ),
+        "fine_signed_browser": pd.read_csv(
+            analysis / "fine_signed_browser.tsv", sep="\t"
         ),
     }
     validations = {
@@ -110,9 +113,7 @@ def _prepare_hsc_ratios(overview: pd.DataFrame) -> pd.DataFrame:
     parts = []
     for model, columns in model_columns.items():
         parts.append(
-            overview[shared + list(columns)]
-            .rename(columns=columns)
-            .assign(model=model)
+            overview[shared + list(columns)].rename(columns=columns).assign(model=model)
         )
     ratios = pd.concat(parts, ignore_index=True)
     segment_order = (
@@ -159,9 +160,7 @@ def _prepare_original_top(overview: pd.DataFrame) -> pd.DataFrame:
     parts = []
     for model, columns in model_columns.items():
         parts.append(
-            overview[shared + list(columns)]
-            .rename(columns=columns)
-            .assign(model=model)
+            overview[shared + list(columns)].rename(columns=columns).assign(model=model)
         )
     return pd.concat(parts, ignore_index=True)
 
@@ -230,9 +229,7 @@ def _prepare_validation_table(pipeline_validation: dict[str, object]) -> pd.Data
 
 
 def _overview_segment(overview: pd.DataFrame, gene: str, rank: int) -> pd.Series:
-    return overview.loc[
-        overview.gene.eq(gene) & overview.segment_rank.eq(rank)
-    ].iloc[0]
+    return overview.loc[overview.gene.eq(gene) & overview.segment_rank.eq(rank)].iloc[0]
 
 
 def _prepare_gene_interpretation(overview: pd.DataFrame) -> pd.DataFrame:
@@ -296,6 +293,7 @@ def prepare_report_data(root: Path) -> ReportData:
         "mdk_centers": _prepare_mdk_centers(raw["mdk_centers"]),
         "mdk_concordance": raw["mdk_concordance"],
         "validation": validation,
+        "fine_signed_browser": raw["fine_signed_browser"],
     }
     frames["summary"] = pd.DataFrame(
         [

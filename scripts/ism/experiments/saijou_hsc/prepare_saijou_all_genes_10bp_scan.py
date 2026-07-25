@@ -9,19 +9,45 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-from pyfaidx import Fasta
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from grelu.interpret.ism.mutations import strict_unique_shuffles  # noqa: E402
+from grelu.interpret.ism.fasta import FastaReference  # noqa: E402
+from grelu.interpret.ism.mutations import (  # noqa: E402
+    AnchoredScan,
+    anchored_scan_centers,
+    scan_anchored_strict_shuffles,
+)
 
 if __package__:
-    from .tools.genomics import centered_interval, gtf_attr, observed_peak
+    from .tools.genomics import (
+        TRANSCRIPT_OVERRIDES,
+        centered_interval,
+        gtf_attr,
+        observed_peak,
+    )
+    from .tools.manifests import (
+        ManifestLocus,
+        readout_row,
+        scan_exclusion_rows,
+        scan_manifest_rows,
+    )
 else:
-    from tools.genomics import centered_interval, gtf_attr, observed_peak
+    from tools.genomics import (
+        TRANSCRIPT_OVERRIDES,
+        centered_interval,
+        gtf_attr,
+        observed_peak,
+    )
+    from tools.manifests import (
+        ManifestLocus,
+        readout_row,
+        scan_exclusion_rows,
+        scan_manifest_rows,
+    )
 
 
 DEFAULT_FASTA = "/work/Database/Database_fromDocker/Referencedata_mm10/genome.fa"
@@ -32,7 +58,6 @@ DEFAULT_HSC_BIGWIG = (
 )
 DEFAULT_OUT = REPO_ROOT / "experiments/ism/saijou_all_genes_10bp_scan/prepared"
 DEFAULT_GENES = "Mdk,Acta2,Col1a1,Timp1,Vegfc,Col1a2,Hgf,Igf1,Ngf"
-DEFAULT_TRANSCRIPTS = {"Acta2": "ENSMUST00000238147"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -95,7 +120,7 @@ def load_genes(gtf_path: str | Path, requested: list[str]) -> pd.DataFrame:
         raise ValueError(f"Genes not found in GTF: {missing}")
 
     transcripts = table.loc[table.feature.eq("transcript")]
-    for gene, transcript_id in DEFAULT_TRANSCRIPTS.items():
+    for gene, transcript_id in TRANSCRIPT_OVERRIDES.items():
         if gene not in requested:
             continue
         matches = transcripts.loc[
@@ -125,16 +150,15 @@ def add_readout(
     if start < output_start or end > output_end or end <= start:
         return
     rows.append(
-        {
-            "readout_id": f"{gene.gene}__{role}__{start}_{end}",
-            "gene": gene.gene,
-            "locus_id": "*",
-            "chrom": gene.chrom,
-            "start": int(start),
-            "end": int(end),
-            "anchor": int(anchor),
-            "role": role,
-        }
+        readout_row(
+            readout_id=f"{gene.gene}__{role}__{start}_{end}",
+            gene=gene.gene,
+            chrom=gene.chrom,
+            start=start,
+            end=end,
+            anchor=anchor,
+            role=role,
+        )
     )
 
 
@@ -192,62 +216,6 @@ def build_readouts(genes: pd.DataFrame, readout_bp: int, hsc_bigwig: str) -> pd.
     return pd.DataFrame.from_records(rows).drop_duplicates(["readout_id"])
 
 
-def _scan_centers(args: argparse.Namespace) -> list[int]:
-    return list(
-        range(
-            -args.half_window_bp + args.span_bp // 2,
-            args.half_window_bp - args.span_bp // 2 + 1,
-            args.stride_bp,
-        )
-    )
-
-
-def _mutation_record(
-    *,
-    gene,
-    locus_id: str,
-    tx_offset: int,
-    genomic_center: int,
-    edit_start: int,
-    edit_end: int,
-    reference: str,
-    alternate: str,
-    replicate: int,
-    span_bp: int,
-) -> dict[str, object]:
-    return {
-        "mutation_id": (
-            f"{locus_id}__tx{tx_offset:+d}__{edit_start}_{edit_end}"
-            f"__shuffle_rep{replicate:02d}"
-        ),
-        "locus_id": locus_id,
-        "locus_role": "tss_10bp_strict_scan",
-        "gene": gene.gene,
-        "chrom": gene.chrom,
-        "gene_strand": gene.strand,
-        "gene_tss": int(gene.analysis_tss),
-        "gene_tes": int(gene.tes),
-        "edit_start": edit_start,
-        "edit_end": edit_end,
-        "edit_center_position": genomic_center,
-        "edit_length_bp": span_bp,
-        "ref_sequence": reference,
-        "alt_sequence": alternate,
-        "mutation_kind": "strict_mononucleotide_shuffle",
-        "replacement_mode": "strict_shuffle",
-        "replacement_replicate": replicate,
-        "variant_position": genomic_center,
-        "variant_offset_from_tss_genomic_bp": (
-            genomic_center - int(gene.analysis_tss)
-        ),
-        "variant_offset_from_tss_transcription_bp": tx_offset,
-        "ref_base": reference,
-        "alt_base": alternate,
-        "control_type": "standard_scan",
-        "source": "Mdk-style TSS-centered 10-bp strict-shuffle scan",
-    }
-
-
 def _scan_gene(
     *,
     fasta,
@@ -256,52 +224,31 @@ def _scan_gene(
     args: argparse.Namespace,
 ) -> tuple[list[dict], list[dict], dict[str, object]]:
     locus_id = f"{gene.gene.lower()}_tss1kb_span10_strict_scan"
-    mutations = []
-    exclusions = []
-    direction = 1 if gene.strand == "+" else -1
-    for tx_offset in centers:
-        genomic_center = int(gene.analysis_tss) + direction * tx_offset
-        edit_start = genomic_center - args.span_bp // 2
-        edit_end = edit_start + args.span_bp
-        reference = str(fasta[gene.chrom][edit_start:edit_end]).upper()
-        mutation_key = f"{locus_id}:{tx_offset}:{edit_start}:{edit_end}"
-        try:
-            alternates = strict_unique_shuffles(
-                reference,
-                n=args.replicates,
-                seed=args.seed,
-                mutation_key=mutation_key,
-            )
-        except ValueError as exc:
-            exclusions.append(
-                {
-                    "gene": gene.gene,
-                    "variant_offset_from_tss_transcription_bp": tx_offset,
-                    "edit_start": edit_start,
-                    "edit_end": edit_end,
-                    "ref_sequence": reference,
-                    "reason": str(exc),
-                }
-            )
-            continue
-        mutations.extend(
-            _mutation_record(
-                gene=gene,
-                locus_id=locus_id,
-                tx_offset=tx_offset,
-                genomic_center=genomic_center,
-                edit_start=edit_start,
-                edit_end=edit_end,
-                reference=reference,
-                alternate=alternate,
-                replicate=replicate,
-                span_bp=args.span_bp,
-            )
-            for replicate, alternate in enumerate(alternates)
-        )
-    mutable = sorted(
-        {row["variant_offset_from_tss_transcription_bp"] for row in mutations}
+    scan = AnchoredScan(
+        locus_id=locus_id,
+        chrom=gene.chrom,
+        anchor=int(gene.analysis_tss),
+        strand=gene.strand,
     )
+    locus = ManifestLocus(
+        scan=scan,
+        locus_role="tss_10bp_strict_scan",
+        gene=gene.gene,
+        tes=int(gene.tes),
+        control_type="standard_scan",
+        source="Mdk-style TSS-centered 10-bp strict-shuffle scan",
+    )
+    edits, excluded = scan_anchored_strict_shuffles(
+        fasta=fasta,
+        scan=scan,
+        centers=centers,
+        span_bp=args.span_bp,
+        replicates=args.replicates,
+        seed=args.seed,
+    )
+    mutations = scan_manifest_rows(locus, edits)
+    exclusions = scan_exclusion_rows(excluded, gene=gene.gene)
+    mutable = sorted({edit.tx_offset for edit in edits})
     locus = {
         "locus_id": locus_id,
         "gene": gene.gene,
@@ -314,8 +261,8 @@ def _scan_gene(
         "chrom": gene.chrom,
         "strand": gene.strand,
         "analysis_tss": int(gene.analysis_tss),
-        "genomic_start": min(row["edit_start"] for row in mutations),
-        "genomic_end": max(row["edit_end"] for row in mutations),
+        "genomic_start": min(edit.edit_start for edit in edits),
+        "genomic_end": max(edit.edit_end for edit in edits),
     }
     return mutations, exclusions, locus
 
@@ -328,12 +275,7 @@ def prepare_mutation_tables(
     mutations = []
     exclusions = []
     loci = []
-    with Fasta(
-        args.fasta,
-        as_raw=True,
-        sequence_always_upper=True,
-        rebuild=False,
-    ) as fasta:
+    with FastaReference(args.fasta) as fasta:
         for gene in genes.itertuples(index=False):
             gene_mutations, gene_exclusions, locus = _scan_gene(
                 fasta=fasta,
@@ -422,12 +364,14 @@ def write_prepared_tables(
 
 def main() -> None:
     args = parse_args()
-    if args.span_bp % 2:
-        raise ValueError("span-bp must be even")
     requested = [gene.strip() for gene in args.genes.split(",") if gene.strip()]
+    centers = anchored_scan_centers(
+        half_window_bp=args.half_window_bp,
+        span_bp=args.span_bp,
+        stride_bp=args.stride_bp,
+    )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     genes = load_genes(args.gtf, requested)
-    centers = _scan_centers(args)
     manifest, exclusions, loci = prepare_mutation_tables(genes, centers, args)
     readouts = build_readouts(genes, args.readout_bp, args.hsc_bigwig)
     write_prepared_tables(

@@ -44,6 +44,7 @@ CHART_MAP = """# Chart map
 |---|---|---|---|---|---|
 | Candidate specificity | How HSC-selective is each candidate in each model? | comparison / horizontal grouped bar | segment, ratio, model | strength and specificity differ | hard two-root |
 | Four-cell matrix | Which head is actually strongest? | matrix / heatmap | segment-model, cell, median absolute effect | five candidates are not HSC-top in both | hard two-root |
+| Signed HSC Browser | What is the direction and magnitude across the full 1-kb scan? | ordered-axis / nine small multiples | TSS offset, signed median log2FC, model | position and effect size can be read directly | hard two-root plus zero line; gene-specific symmetric scales |
 | Mdk robustness | Does the hub replicate across shuffle manifests? | ordered-axis / multi-series line | offset, margin, model-manifest | segment-level Borzoi result is more stable than center ranking | hard two-root plus zero line |
 | Original context | Were candidates already sequence-sensitive before fine-tuning? | comparison / horizontal grouped bar | segment, max original effect, model | most candidates have pre-existing context | hard two-root |
 """
@@ -73,6 +74,7 @@ REPORT_DATASET_ORDER = (
     "mdk_centers",
     "mdk_concordance",
     "validation",
+    "fine_signed_browser",
 )
 
 
@@ -143,9 +145,7 @@ def build_report_artifact(
             "version": 1,
             "generatedAt": generated_at,
             "status": "ready",
-            "datasets": {
-                name: _records(frames[name]) for name in REPORT_DATASET_ORDER
-            },
+            "datasets": {name: _records(frames[name]) for name in REPORT_DATASET_ORDER},
         },
         "sources": sources,
     }
@@ -173,9 +173,7 @@ def write_report_artifacts(
     """Write the portable artifact and its human-readable companions."""
 
     artifact_path = report_dir / "artifact.json"
-    artifact_path.write_text(
-        json.dumps(artifact, indent=2, ensure_ascii=False) + "\n"
-    )
+    artifact_path.write_text(json.dumps(artifact, indent=2, ensure_ascii=False) + "\n")
     gene_interpretation.to_csv(
         report_dir / "gene_interpretation.tsv", sep="\t", index=False
     )
@@ -219,6 +217,7 @@ def main() -> None:
         frames["fine_cell_matrix"],
         frames["mdk_centers"],
         frames["original_top"],
+        frames["fine_signed_browser"],
     )
     generated_at = utc_timestamp()
     artifact = build_report_artifact(frames, static_figures, generated_at)

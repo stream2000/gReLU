@@ -9,14 +9,38 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-from pyfaidx import Fasta
 
 
 REPO_ROOT = Path(__file__).resolve().parents[6]
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from grelu.interpret.ism.mutations import strict_unique_shuffles  # noqa: E402
+from grelu.interpret.ism.fasta import FastaReference  # noqa: E402
+from grelu.interpret.ism.mutations import (  # noqa: E402
+    AnchoredScan,
+    anchored_scan_centers,
+    scan_anchored_strict_shuffles,
+)
+
+if __package__:
+    from ..manifests import (
+        ManifestLocus,
+        readout_row,
+        scan_exclusion_rows,
+        scan_manifest_rows,
+        standard_readout_row,
+    )
+else:
+    SAIJOU_DIR = Path(__file__).resolve().parents[2]
+    if str(SAIJOU_DIR) not in sys.path:
+        sys.path.insert(0, str(SAIJOU_DIR))
+    from tools.manifests import (
+        ManifestLocus,
+        readout_row,
+        scan_exclusion_rows,
+        scan_manifest_rows,
+        standard_readout_row,
+    )
 
 
 DEFAULT_FASTA = "/work/Database/Database_fromDocker/Referencedata_mm10/genome.fa"
@@ -53,105 +77,38 @@ def parse_args() -> argparse.Namespace:
 LOCUS_ID = "mdk_tss1kb_span10_strict_background"
 
 
-def _scan_centers(args: argparse.Namespace) -> list[int]:
-    return list(
-        range(
-            -args.half_window_bp + args.span_bp // 2,
-            args.half_window_bp - args.span_bp // 2 + 1,
-            args.stride_bp,
-        )
-    )
-
-
-def _mutation_record(
-    *,
-    tx_offset: int,
-    genomic_center: int,
-    edit_start: int,
-    edit_end: int,
-    ref: str,
-    alt: str,
-    replicate: int,
-    span_bp: int,
-) -> dict[str, object]:
-    return {
-        "mutation_id": (
-            f"{LOCUS_ID}__tx{tx_offset:+d}__{edit_start}_{edit_end}"
-            f"__shuffle_rep{replicate:02d}"
-        ),
-        "locus_id": LOCUS_ID,
-        "locus_role": "mdk_tss_background",
-        "gene": GENE["gene"],
-        "chrom": GENE["chrom"],
-        "gene_strand": GENE["strand"],
-        "gene_tss": GENE["analysis_tss"],
-        "gene_tes": GENE["tes"],
-        "edit_start": edit_start,
-        "edit_end": edit_end,
-        "edit_center_position": genomic_center,
-        "edit_length_bp": span_bp,
-        "ref_sequence": ref,
-        "alt_sequence": alt,
-        "mutation_kind": "strict_mononucleotide_shuffle",
-        "replacement_mode": "strict_shuffle",
-        "replacement_replicate": replicate,
-        "variant_position": genomic_center,
-        "variant_offset_from_tss_genomic_bp": genomic_center - GENE["analysis_tss"],
-        "variant_offset_from_tss_transcription_bp": tx_offset,
-        "ref_base": ref,
-        "alt_base": alt,
-        "control_type": "background",
-        "source": "Mdk TSS-centered strict-shuffle specificity background",
-    }
+SCAN = AnchoredScan(
+    locus_id=LOCUS_ID,
+    chrom=GENE["chrom"],
+    anchor=int(GENE["analysis_tss"]),
+    strand=GENE["strand"],
+)
+LOCUS = ManifestLocus(
+    scan=SCAN,
+    locus_role="mdk_tss_background",
+    gene=GENE["gene"],
+    tes=GENE["tes"],
+    control_type="background",
+    source="Mdk TSS-centered strict-shuffle specificity background",
+)
 
 
 def _prepare_manifest(
     args: argparse.Namespace, centers: list[int]
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    records = []
-    excluded = []
-    with Fasta(args.fasta, as_raw=True, sequence_always_upper=True, rebuild=False) as fasta:
-        for tx_offset in centers:
-            genomic_center = int(GENE["analysis_tss"] - tx_offset)
-            edit_start = genomic_center - args.span_bp // 2
-            edit_end = edit_start + args.span_bp
-            ref = str(fasta[GENE["chrom"]][edit_start:edit_end]).upper()
-            key = f"{LOCUS_ID}:{tx_offset}:{edit_start}:{edit_end}"
-            try:
-                alternates = strict_unique_shuffles(
-                    ref,
-                    n=args.replicates,
-                    seed=args.seed,
-                    mutation_key=key,
-                )
-            except ValueError as exc:
-                excluded.append(
-                    {
-                        "variant_offset_from_tss_transcription_bp": tx_offset,
-                        "edit_start": edit_start,
-                        "edit_end": edit_end,
-                        "ref_sequence": ref,
-                        "reason": str(exc),
-                    }
-                )
-                continue
-            records.extend(
-                _mutation_record(
-                    tx_offset=tx_offset,
-                    genomic_center=genomic_center,
-                    edit_start=edit_start,
-                    edit_end=edit_end,
-                    ref=ref,
-                    alt=alt,
-                    replicate=replicate,
-                    span_bp=args.span_bp,
-                )
-                for replicate, alt in enumerate(alternates)
-            )
-    manifest = pd.DataFrame.from_records(records)
+    with FastaReference(args.fasta) as fasta:
+        edits, excluded = scan_anchored_strict_shuffles(
+            fasta=fasta,
+            scan=SCAN,
+            centers=centers,
+            span_bp=args.span_bp,
+            replicates=args.replicates,
+            seed=args.seed,
+        )
+    manifest = pd.DataFrame.from_records(scan_manifest_rows(LOCUS, edits))
     if manifest.empty:
         raise RuntimeError("No mutable Mdk windows were prepared")
-    return manifest, pd.DataFrame.from_records(excluded)
+    return manifest, pd.DataFrame.from_records(scan_exclusion_rows(excluded))
 
 
 def _locus_table(
@@ -184,39 +141,21 @@ def _locus_table(
     )
 
 
-def _readout_table() -> pd.DataFrame:
+def _readout_table(readout_bp: int = 1024) -> pd.DataFrame:
+    standard = dict(gene=GENE["gene"], chrom=GENE["chrom"], width_bp=readout_bp)
     return pd.DataFrame(
         [
-            {
-                "readout_id": "Mdk__tss_1024bp",
-                "gene": "Mdk",
-                "locus_id": "*",
-                "chrom": "chr2",
-                "start": 91931785,
-                "end": 91932809,
-                "anchor": 91932297,
-                "role": "tss",
-            },
-            {
-                "readout_id": "Mdk__tes_3prime_1024bp",
-                "gene": "Mdk",
-                "locus_id": "*",
-                "chrom": "chr2",
-                "start": 91929292,
-                "end": 91930316,
-                "anchor": 91929804,
-                "role": "tes_3prime",
-            },
-            {
-                "readout_id": "Mdk__gene_body",
-                "gene": "Mdk",
-                "locus_id": "*",
-                "chrom": "chr2",
-                "start": 91929804,
-                "end": 91932297,
-                "anchor": 91932297,
-                "role": "gene_body",
-            },
+            standard_readout_row(role="tss", center=GENE["analysis_tss"], **standard),
+            standard_readout_row(role="tes_3prime", center=GENE["tes"], **standard),
+            readout_row(
+                readout_id=f"{GENE['gene']}__gene_body",
+                gene=GENE["gene"],
+                chrom=GENE["chrom"],
+                start=GENE["start"],
+                end=GENE["end"],
+                anchor=GENE["analysis_tss"],
+                role="gene_body",
+            ),
         ]
     )
 
@@ -263,11 +202,13 @@ def _validation_summary(
 
 def main() -> None:
     args = parse_args()
-    if args.span_bp % 2:
-        raise ValueError("span-bp must be even so edit centers are unambiguous")
+    centers = anchored_scan_centers(
+        half_window_bp=args.half_window_bp,
+        span_bp=args.span_bp,
+        stride_bp=args.stride_bp,
+    )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     gene = {**GENE, "length": int(GENE["end"] - GENE["start"])}
-    centers = _scan_centers(args)
     manifest, excluded = _prepare_manifest(args, centers)
     mutable_centers = sorted(
         manifest["variant_offset_from_tss_transcription_bp"].unique().tolist()
