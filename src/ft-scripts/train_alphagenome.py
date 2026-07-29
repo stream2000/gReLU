@@ -146,6 +146,7 @@ def choose_lora_targets(args: argparse.Namespace) -> tuple[list[str], list[str]]
                 else ALPHAGENOME_128BP_CONV_TARGETS
             )
     elif args.lora_preset == "all":
+        # An empty target matches every eligible module.
         linear_targets = [""]
         conv_targets = [""]
     else:
@@ -163,6 +164,7 @@ def count_matching_modules(root: nn.Module, targets: list[str], module_type: typ
     )
 
 
+# The upstream model does not provide a Conv1d LoRA adapter.
 class Conv1dLoRA(nn.Module):
     """LoRA-style adapter for Conv1d layers, including padding='same' layers."""
 
