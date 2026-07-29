@@ -139,3 +139,6 @@ cache files, unrelated user changes, or local Progress archives.
 - `scripts/ism/experiments/saijou_hsc/WORKFLOW_INDEX.md`: Saijou stage order.
 - `scripts/ism/experiments/saijou_hsc/ANALYSIS_HARNESS.md`: analysis contracts.
 - `experiments/Progress.md`: current validated state and open decisions.
+- `docs/project_scientific_question_audit_zh.md`:
+  project question history, supervisor discussion, AI-drift audit, scientific
+  scope, current evidence, and recommended decision gates.
