@@ -15,6 +15,16 @@ from score_calculations import CENTER_KEYS
 LOCAL_BIN_OFFSETS = np.array([-1, 0, 1], dtype=int)
 
 
+def replacement_mad(values: pd.Series) -> float:
+    """Median absolute deviation across a center's shuffle replacements.
+
+    Mirrors the fine-tuned pipeline so that shuffle-to-shuffle spread means the
+    same thing on both sides of the workbench.
+    """
+    array = values.to_numpy(dtype=float)
+    return float(np.median(np.abs(array - np.median(array))))
+
+
 def load_validated_track_manifest(
     root: Path, run_name: str
 ) -> pd.DataFrame:
@@ -91,6 +101,19 @@ def summarize_local_profile_effects(
         values, strongest_bin[:, :, None], axis=2
     )[:, :, 0]
 
+    # Reference level is read at the edit's own bin rather than the strongest
+    # bin: it must not depend on which mutation is being scored, otherwise it
+    # could not serve as a baseline for that position.
+    reference = np.asarray(
+        np.load(profile_dir / metadata["reference_profile"], mmap_mode="r"),
+        dtype=np.float32,
+    )
+    if reference.shape[0] != array.shape[1]:
+        raise ValueError(f"{gene}: reference profile track count mismatch")
+    reference_level = reference[
+        channel_indices[None, :], center_bins[:, None]
+    ]
+
     mutation_tracks = pd.DataFrame(
         {
             "gene": gene,
@@ -105,6 +128,7 @@ def summarize_local_profile_effects(
             "channel_index": np.tile(channel_indices, len(profile_index)),
             "view_absolute_log2fc": mutation_absolute.ravel(),
             "view_signed_log2fc": mutation_signed.ravel(),
+            "view_reference_level": reference_level.ravel(),
         }
     ).merge(
         local_tracks[
@@ -116,7 +140,11 @@ def summarize_local_profile_effects(
     )
     if not np.isfinite(
         mutation_tracks[
-            ["view_absolute_log2fc", "view_signed_log2fc"]
+            [
+                "view_absolute_log2fc",
+                "view_signed_log2fc",
+                "view_reference_level",
+            ]
         ].to_numpy()
     ).all():
         raise ValueError(f"{gene}: local profile extraction is non-finite")
@@ -130,6 +158,8 @@ def summarize_local_profile_effects(
             replacements=("replacement_replicate", "nunique"),
             median_absolute_log2fc=("view_absolute_log2fc", "median"),
             median_signed_log2fc=("view_signed_log2fc", "median"),
+            replacement_mad=("view_signed_log2fc", replacement_mad),
+            reference_level=("view_reference_level", "median"),
         )
         .reset_index()
     )
