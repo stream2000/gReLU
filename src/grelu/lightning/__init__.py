@@ -197,6 +197,20 @@ class LightningModel(pl.LightningModule):
                     "pearson": PearsonCorrCoef(
                         num_outputs=self.model.head.n_tasks, average=False
                     ),
+                    # Coverage-scale targets span several orders of magnitude,
+                    # so the raw-scale pair above is set by a few peak bins.
+                    # The log-scale pair is what separates a model that fits
+                    # the whole profile from one that only places the peaks.
+                    "mse_log1p": MSE(
+                        num_outputs=self.model.head.n_tasks,
+                        average=False,
+                        log_transform=True,
+                    ),
+                    "pearson_log1p": PearsonCorrCoef(
+                        num_outputs=self.model.head.n_tasks,
+                        average=False,
+                        log_transform=True,
+                    ),
                 }
             )
 
