@@ -578,6 +578,8 @@ class BorzoiPretrainedModel(BaseModel):
     Args:
         n_tasks: Number of tasks for the model to predict
         fold: Which fold of the model to load (default=0)
+        weights_path: Optional local state dict. When omitted, download or reuse
+            the published Hugging Face cache entry for ``fold``.
         n_transformers: Number of transformer blocks to use (default=8)
         crop_len: Number of positions to crop at either end of the output (default=0)
         act_func: Name of the activation function. Defaults to 'gelu_borzoi' which uses
@@ -594,6 +596,7 @@ class BorzoiPretrainedModel(BaseModel):
         n_tasks: int,
         # weights
         fold: int = 0,
+        weights_path: Optional[str] = None,
         n_transformers: int = 8,
         # head
         crop_len=0,
@@ -628,10 +631,10 @@ class BorzoiPretrainedModel(BaseModel):
             device=device,
         )
 
-        # Load state dict from HuggingFace
+        # Load a supplied local state dict or the published Hugging Face asset.
         from grelu.resources import download_model
 
-        path = download_model(
+        path = weights_path or download_model(
             repo_id="Genentech/borzoi-model",
             filename=f"human_state_dict_rep{fold}.h5",
         )
