@@ -44,8 +44,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--bigwig_dir", default=DEFAULT_BIGWIG_DIR)
     parser.add_argument("--genome", default=DEFAULT_GENOME)
+    parser.add_argument(
+        "--pretrained_weights",
+        default=None,
+        help="Optional local Borzoi state dict. When omitted, use the Hugging Face cache/download path.",
+    )
     parser.add_argument("--split_dir", default="dataset_store/splits")
     parser.add_argument("--cache_dir", default="dataset_store/mmap_caches")
+    parser.add_argument(
+        "--run_root",
+        default="runs",
+        help="Directory containing run logs and checkpoints.",
+    )
     parser.add_argument("--seq_len", type=int, default=524_288)
     parser.add_argument("--label_len", type=int, default=196_608)
     parser.add_argument("--bin_size", type=int, default=32)
@@ -160,6 +170,8 @@ def main() -> None:
         "crop_len": 5120,
         "final_pool_func": None,
     }
+    if args.pretrained_weights:
+        model_params["weights_path"] = args.pretrained_weights
 
     if args.target_mode == "poisson":
         loss = "poisson"
@@ -176,7 +188,7 @@ def main() -> None:
     default_lr = 3e-6 if args.finetune_mode == "headonly" else 1e-5
     lr = args.lr if args.lr is not None else default_lr
     run_name = f"borzoi_{args.split_name}_{args.target_mode}_{args.finetune_mode}"
-    ckpt_dir = f"runs/{run_name}/checkpoints"
+    ckpt_dir = str(Path(args.run_root) / run_name / "checkpoints")
     train_params = {
         "task": "regression",
         "loss": loss,
@@ -187,7 +199,7 @@ def main() -> None:
         "devices": parse_devices(args.devices),
         "logger": "csv",
         "name": run_name,
-        "save_dir": "runs",
+        "save_dir": args.run_root,
         "max_epochs": args.max_epochs,
         "checkpoint": {
             "dirpath": ckpt_dir,
