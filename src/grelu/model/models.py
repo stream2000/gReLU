@@ -16,8 +16,10 @@ from typing import List, Optional, Union
 import torch
 from torch import Tensor, nn
 
-from grelu.model.heads import ConvHead, MLPHead
+from grelu.model.heads import AlphaGenomeFinetuneHead, ConvHead, MLPHead
 from grelu.model.trunks import (
+    AlphaGenomeFeatureTrunk,
+    AlphaGenomeTrunk,
     ConvGRUTrunk,
     ConvTransformerTrunk,
     ConvTrunk,
@@ -52,6 +54,27 @@ class BaseModel(nn.Module):
         x = self.embedding(x)
         x = self.head(x)
         return x
+
+
+class NTv3PretrainedProfileModel(BaseModel):
+    """Frozen NTv3-8M plus the fixed local Saijou profile probe."""
+
+    def __init__(self, n_tasks, checkpoint="InstaDeepAI/NTv3_8M_pre", revision=None,
+                 seq_len=524_288, label_len=196_608, bin_size=32,
+                 use_bfloat16_compute=True):
+        from grelu.model.heads import NTv3LocalProfileHead
+        from grelu.model.trunks.ntv3 import NTv3FeatureTrunk
+
+        if n_tasks != 4:
+            raise ValueError("NTv3 MVP requires four tasks")
+        super().__init__(
+            embedding=NTv3FeatureTrunk(
+                checkpoint=checkpoint, revision=revision, seq_len=seq_len,
+                label_len=label_len, bin_size=bin_size,
+                use_bfloat16_compute=use_bfloat16_compute,
+            ),
+            head=NTv3LocalProfileHead(),
+        )
 
 
 class ConvModel(BaseModel):
@@ -817,3 +840,74 @@ class EnformerPretrainedModel(BaseModel):
         )
 
         super().__init__(embedding=model.embedding, head=head)
+
+
+class AlphaGenomeModel(BaseModel):
+    """
+    A model that wraps the AlphaGenome architecture.
+
+    Args:
+        num_organisms: Number of organisms (default 2: human, mouse).
+        organism_index: Default organism index to use for inference.
+        output_key: The output modality to extract (e.g., 'atac', 'dnase', 'cage', 'rna_seq', 'contact_maps').
+        resolution: The resolution to extract (1 or 128).
+        dtype_policy: DtypePolicy for precision control.
+        weights_path: Optional path to a pretrained weights file (.pth).
+        gradient_checkpointing: If True, enable gradient checkpointing.
+        **kwargs: Additional arguments passed to AlphaGenome constructor.
+    """
+
+    def __init__(self, **kwargs):
+        embedding = AlphaGenomeTrunk(**kwargs)
+        head = nn.Identity()
+        head.n_tasks = embedding.out_channels
+        super().__init__(embedding, head)
+
+
+class AlphaGenomeFinetuneModel(BaseModel):
+    """
+    AlphaGenome model with a new gReLU ConvHead for downstream track fine-tuning.
+
+    The AlphaGenome trunk returns sequence embeddings at the requested
+    resolution, and the head maps those embeddings to ``n_tasks`` custom tracks.
+    """
+
+    def __init__(
+        self,
+        n_tasks: int,
+        resolution: int = 128,
+        label_len: Optional[int] = None,
+        bin_size: Optional[int] = None,
+        head_hidden_channels: int = 0,
+        head_hidden_layers: int = 0,
+        head_dropout: float = 0.0,
+        head_norm: bool = True,
+        final_pool_func: Optional[str] = None,
+        dtype=None,
+        device=None,
+        **kwargs,
+    ):
+        embedding = AlphaGenomeFeatureTrunk(resolution=resolution, **kwargs)
+        if label_len is None or bin_size is None:
+            head = ConvHead(
+                n_tasks=n_tasks,
+                in_channels=embedding.out_channels,
+                pool_func=final_pool_func,
+                dtype=dtype,
+                device=device,
+            )
+        else:
+            head = AlphaGenomeFinetuneHead(
+                n_tasks=n_tasks,
+                in_channels=embedding.out_channels,
+                resolution=resolution,
+                label_len=label_len,
+                bin_size=bin_size,
+                hidden_channels=head_hidden_channels,
+                hidden_layers=head_hidden_layers,
+                dropout=head_dropout,
+                norm=head_norm,
+                dtype=dtype,
+                device=device,
+            )
+        super().__init__(embedding, head)

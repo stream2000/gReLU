@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ title }}</title>
+  <style>{{ css }}</style>
+</head>
+<body><main>
+  <h1><i>Mdk</i> TSS-proximal 10-bp ISM</h1>
+  <p class="subtitle">An audited single-gene discussion brief · AlphaGenome and Borzoi · {{ generated_at }}</p>
+
+  <div class="summary">
+    <strong>Technical summary.</strong> The 1-kb fine-tuned scan identifies a primary
+    +463..+475 window whose fixed TES/3′ effect ranks HSC first among the four modeled
+    cell heads in both architectures. A nearby +499..+507 window is sequence-sensitive,
+    but Borzoi does not rank HSC first there. These are model effect sizes, not estimates
+    of statistical significance or biological causality.
+  </div>
+
+  <h2>Background and objective</h2>
+  <p>We asked whether short sequence perturbations near the <i>Mdk</i> transcription
+  start site change the fine-tuned HSC RNA prediction, whether the response is localized
+  relative to macrophage, LSEC and cholangiocyte heads, and whether the same sequence was
+  already active in the original Borzoi model. The final question is motivated by gRely:
+  an ISM prediction is more credible when target activity, regulatory context, output
+  concentration and reproducibility agree, rather than when one output track alone is large.</p>
+
+  <h2>Fine-tuned four-cell Browser</h2>
+  <p>We replaced successive 10-bp windows across the TSS-centered 1,024-bp interval,
+  using a 2-bp stride and three deterministic mononucleotide-preserving shuffles. For this
+  cross-cell comparison we fixed the readout to the TES/3′ 1,024-bp RNA output. The ordinate
+  is median signed log2(mutant/reference): negative values lower predicted output.</p>
+  <div class="figure">
+    <img src="{{ browser_figure }}" alt="Four-cell Mdk signed-effect Browser">
+    <p class="caption">Figure 1. One panel per cell head; AlphaGenome and Borzoi are
+    overlaid with a common symmetric y-axis. Shuffles are perturbation variants, not biological replicates.</p>
+  </div>
+  {{ window_table | safe }}
+  <div class="caution"><strong>Interpretation boundary.</strong> Candidate selection and
+  visualization use the same scan. HSC-first therefore describes relative ordering within
+  these four heads and this fixed readout; it is not an unbiased validation rate.</div>
+
+  <h2 class="page-break">What the original Borzoi tracks add</h2>
+  <p>The original-model analysis used {{ selected_tracks }} selected tracks, of which
+  {{ compatible_tracks }} were unstranded or compatible with the negative strand of
+  <i>Mdk</i>. They span RNA-seq, CAGE, accessibility, active histone marks and TF/Pol-II
+  occupancy proxies. These modalities are summarized separately and are not compared as
+  calibrated units.</p>
+  <div class="figure">
+    <img src="{{ original_figure }}" alt="Original Borzoi track-group effects">
+    <p class="caption">Figure 2. Median signed effect by curated original-Borzoi track group
+    for the two retained windows. The original tracks provide regulatory context, not a matched HSC replication.</p>
+  </div>
+  {{ original_table | safe }}
+  <p>The primary window shows pre-existing sensitivity across regulatory proxies without a
+  uniform liver-RNA decrease. The secondary window has a coherent negative liver-RNA response
+  across {{ secondary_negative }}/{{ liver_track_count }} compatible tracks. Conservatively,
+  this supports an already responsive local regulatory context and a difference between the
+  two nearby modules; it does not show that fine-tuning created a new element or identify its
+  active cell type in vivo.</p>
+
+  <h2>Motif scope and the gRely gap</h2>
+  <p>The sequence annotation supports an SP/KLF-rich family-level hypothesis for the primary
+  interval. Shared PWM grammar does not distinguish a specific SP or KLF factor, and no matched
+  HSC occupancy assay was used here.</p>
+  <p>Compared with a full gRely-style evaluation, the present study still lacks:</p>
+  <ul>
+    <li>independent model seeds or experimental replicates to test reproducibility;</li>
+    <li>matched HSC expression and chromatin evidence at the analyzed locus;</li>
+    <li>a calibrated measure of how concentrated the effect is among all relevant output tracks;</li>
+    <li>motif-breaking, motif-preserving and dinucleotide-matched edits that separate grammar disruption from generic sequence replacement;</li>
+    <li>an external truth set linking predicted ISM response to MPRA or CRISPR perturbation.</li>
+  </ul>
+  <p>Accordingly, +463..+475 is the stronger candidate for targeted follow-up, while
+  +499..+507 should remain a secondary, context-sensitive region rather than a second
+  cross-model HSC-specific claim.</p>
+
+  <p class="provenance">Analysis contract v{{ contract_version }}. Report rendered only from
+  versioned TSV/JSON analysis outputs; no raw parquet is read by this renderer. Maximum
+  independent original-summary difference versus the canonical saved matrix:
+  {{ max_difference }}.</p>
+</main></body></html>
