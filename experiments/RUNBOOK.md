@@ -173,3 +173,53 @@ gene, transcript, strand, chromosome, start, and end.
   left untouched.
 - Keep `num_workers` conservative for multi-GPU trials; total worker count is
   approximately `num_gpus * num_workers`.
+
+## NTv3 frozen-profile MVP (2026-09-08)
+
+Current user override: a single randomly chosen seed43 on GPUs0/1/2 using DDP,
+per-rank batch4 and accumulation2 (effective batch24), validation batch1.
+The old three-independent-seed service is stopped; artifacts are preserved.
+Current service: `ntv3-seed43-ddp-b4-20260908.service`; outputs:
+`experiments/validation/20260908_1032_ntv3_seed43_ddp_b4/`.
+Batch benchmarking and DDP resume qualification are saved under
+`experiments/validation/20260908_1030_ntv3_single_ddp/`.
+The runner now requires `--seed`, `--batch_size`, `--accumulate_grad_batches`
+and `--checkpoint_path`; evaluation requires `--seed` and processes that seed
+only. See `plan/ntv3_mvp_three_stage_design.md` for the active contract and commands.
+
+Uses the existing mouse/mm10 Saijou split and Poisson-multinomial bin32 labels:
+524288 input, central 196608 output, four tracks in hsc/mac/lsec/chol order.
+The frozen trunk is 7,692,475 parameters; the local head is 86,148 parameters.
+Official external code is pinned separately from the weights. The adapter uses
+the final post-skip deconv tensor, **not** the post-GELU MLM projection input.
+No shared environment changes or embedding cache are required.
+
+Validated entry points (run `source activate.sh` first):
+
+```bash
+HF_HUB_OFFLINE=1 CUDA_VISIBLE_DEVICES=0 python src/ft-scripts/train_ntv3.py \
+  --revision c57a813117f0f90142098f81cc912b3357c9ecd1 \
+  --dry_run --out /absolute/new-experiment/stage1.json
+
+HF_HUB_OFFLINE=1 CUDA_VISIBLE_DEVICES=0 python src/ft-scripts/train_ntv3.py \
+  --revision c57a813117f0f90142098f81cc912b3357c9ecd1 \
+  --max_epochs 1 --out /absolute/new-experiment/tiny50.json
+```
+
+Full training uses `--split_name split_chr10_chr11 --max_epochs 40 --seed 43`,
+per-rank batch size 4, accumulation 2, lr 3e-4, bf16, val-loss early stopping
+with patience 3. `--checkpoint_path` restores optimizer and training state.
+Outputs must be new paths; matching existing label-cache manifests are required.
+The CLI does not silently regenerate train/val caches.
+
+Inspect the current durable pipeline with:
+
+```bash
+systemctl --user status ntv3-seed43-ddp-b4-20260908 --no-pager
+```
+
+`pipeline_status.json` is the run state; `seed*/progress.json` is updated per
+epoch. Only `final_validation_summary.json` plus validated metric TSVs indicates
+completion. `run_ntv3_mvp.py` waits for the single DDP training run,
+then `finish_ntv3.py` locks its selected checkpoint hash before creating experiment-local test
+labels and evaluating chr11. A negative result does not trigger retraining.

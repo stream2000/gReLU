@@ -16,6 +16,48 @@ from grelu.model.blocks import ChannelTransformBlock, LinearBlock
 from grelu.model.layers import AdaptivePool
 
 
+class _NTv3ChannelLayerNorm(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.norm = nn.LayerNorm(channels)
+
+    def forward(self, x):
+        return self.norm(x.transpose(1, 2)).transpose(1, 2)
+
+
+class _NTv3DepthwiseResidualBlock(nn.Module):
+    def __init__(self, channels, dilation):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Conv1d(channels, channels, 5, padding=2 * dilation,
+                      dilation=dilation, groups=channels, bias=False),
+            _NTv3ChannelLayerNorm(channels), nn.GELU(),
+            nn.Conv1d(channels, channels, 1),
+        )
+
+    def forward(self, x):
+        return x + self.layers(x)
+
+
+class NTv3LocalProfileHead(nn.Module):
+    """Fixed four-track log-rate probe with a 29-bin receptive field."""
+
+    n_tasks = 4
+
+    def __init__(self):
+        super().__init__()
+        self.input_norm = _NTv3ChannelLayerNorm(256)
+        self.input_projection = nn.Conv1d(256, 128, 1)
+        self.blocks = nn.Sequential(*[
+            _NTv3DepthwiseResidualBlock(128, dilation) for dilation in (1, 2, 4)
+        ])
+        self.output_projection = nn.Conv1d(128, 4, 1)
+
+    def forward(self, x):
+        x = self.input_projection(self.input_norm(x))
+        return self.output_projection(self.blocks(x))
+
+
 class ConvHead(nn.Module):
     """
     A 1x1 Conv layer that transforms the the number of channels in the input and then

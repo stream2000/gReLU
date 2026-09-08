@@ -56,6 +56,27 @@ class BaseModel(nn.Module):
         return x
 
 
+class NTv3PretrainedProfileModel(BaseModel):
+    """Frozen NTv3-8M plus the fixed local Saijou profile probe."""
+
+    def __init__(self, n_tasks, checkpoint="InstaDeepAI/NTv3_8M_pre", revision=None,
+                 seq_len=524_288, label_len=196_608, bin_size=32,
+                 use_bfloat16_compute=True):
+        from grelu.model.heads import NTv3LocalProfileHead
+        from grelu.model.trunks.ntv3 import NTv3FeatureTrunk
+
+        if n_tasks != 4:
+            raise ValueError("NTv3 MVP requires four tasks")
+        super().__init__(
+            embedding=NTv3FeatureTrunk(
+                checkpoint=checkpoint, revision=revision, seq_len=seq_len,
+                label_len=label_len, bin_size=bin_size,
+                use_bfloat16_compute=use_bfloat16_compute,
+            ),
+            head=NTv3LocalProfileHead(),
+        )
+
+
 class ConvModel(BaseModel):
     """
     A fully convolutional model that optionally includes pooling,
