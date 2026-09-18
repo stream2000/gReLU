@@ -1,6 +1,6 @@
 # gReLU Replication Agent Guide
 
-Last updated: 2026-07-25.
+Last updated: 2026-09-18.
 
 This is the concise operating guide for the shared checkout:
 
@@ -42,8 +42,8 @@ activation in launchers.
 - The reusable saturation ISM core lives under `src/grelu/interpret/ism/`.
 - Saijou model-case workflows live under
   `scripts/ism/experiments/saijou_hsc/`.
-- Do not assume MREG or DIC workflows exist in this checkout; inspect before
-  referring to code from another worktree or branch.
+- Inspect the live tree before referring to code from another worktree or
+  branch.
 - Existing dirty-worktree changes belong to the user. Preserve them and stage
   only files that belong to the current task.
 
@@ -91,25 +91,18 @@ audited Mdk workflow.
   Promote reusable logic only after its metric contract, schema checks,
   synthetic tests, and saved-artifact validation are documented.
 
-See `docs/saturation_ism_framework_design.md` for the framework layering.
+`docs/saturation_ism_framework_design.md` records framework and migration
+rationale. Use the live workflow index, tests, and code as implementation
+authority.
 
 ## Progress and artifacts
 
-`experiments/Progress.md` is the current-state handoff and rolling two-month
-history. Keep the most recent fourteen calendar days at the established detail
-level, then retain days 15 through 60 as compact weekly summaries. Detailed
-entries record the branch/commit, command, checkpoint, output, validation,
-caveat, and next action when relevant; prefer a few meaningful entries per day
-over batch-level noise.
-
-Run Progress compaction once every seven days. Preserve detail that has aged
-beyond fourteen days under `experiments/archive/progress/`, update the weekly
-summaries, and record the compaction time, covered range, archive path,
-detailed cutoff, and next scheduled compaction in the active file. If nothing
-aged out, record a no-op compaction instead of rewriting history. Do not delete
-history less than two months old, prematurely compress the two-week detailed
-window, or impose a fixed line limit. Deletion or further compression beyond
-two months requires explicit user approval.
+`experiments/Progress.md` is the status-sensitive handoff, not required reading
+for every task. Read it before reporting current project state or changing an
+active experiment. Record only material, validated results and link detailed
+experiment-local summaries. Its own `History and update rule` section is the
+authority for retention and compaction; do not turn unrelated tasks into
+Progress maintenance.
 
 Canonical analysis tables, figures, and PDFs stay in their experiment output
 directory. For a final PDF deliverable, also place a clearly named convenience
@@ -117,28 +110,20 @@ copy in `/home/fqijun/report` without replacing the canonical artifact.
 
 ## Verification and commits
 
-Use validation proportional to the change. The basic AlphaGenome check is:
-
-```bash
-source activate.sh
-python -m pytest -q tests/test_alphagenome_inference.py
-```
-
-For Saijou changes, run the focused tests listed by `WORKFLOW_INDEX.md` and
-validate saved TSV/JSON interfaces. Always run `git diff --check` before a
-commit.
+Use validation proportional to the change. Run focused tests for the touched
+entry points; for Saijou changes, also validate saved TSV/JSON interfaces.
+Always run `git diff --check` before a commit.
 
 Commit only the intended scope. Do not include generated experiment outputs,
 cache files, unrelated user changes, or local Progress archives.
 
-## Documentation map
+## Task-specific documentation
+
+Load only the branch relevant to the task; do not preload this entire map.
 
 - `SETUP_GUIDE.md`: AlphaGenome environment and inference setup.
-- `experiments/RUNBOOK.md`: Borzoi Saijou fine-tuning.
+- `experiments/RUNBOOK.md`: Saijou fine-tuning and NTv3 MVP operations.
 - `scripts/README.md`: benchmark/script overview.
-- `scripts/ism/experiments/saijou_hsc/WORKFLOW_INDEX.md`: Saijou stage order.
-- `scripts/ism/experiments/saijou_hsc/ANALYSIS_HARNESS.md`: analysis contracts.
-- `experiments/Progress.md`: current validated state and open decisions.
 - `docs/project_scientific_question_audit_zh.md`:
-  project question history, supervisor discussion, AI-drift audit, scientific
-  scope, current evidence, and recommended decision gates.
+  historical question/scope audit with an evidence cutoff of 2026-07-28; do
+  not use it as the current evidence summary.
