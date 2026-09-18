@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Frozen NTv3 profile qualification and training on the existing Saijou stack."""
+"""Frozen/full NTv3 profile qualification and training on the Saijou stack."""
 
 import argparse
 import hashlib
@@ -32,9 +32,10 @@ def write_json(path, data):
 class TrainingAudit(Callback):
     """Audit/timing only: training and metrics remain owned by LightningModel."""
 
-    def __init__(self, out, checksum):
+    def __init__(self, out, checksum, finetune_mode="frozen"):
         self.out = Path(out)
         self.checksum = checksum
+        self.finetune_mode = finetune_mode
         self.seconds = []
         self.started = time.perf_counter()
 
@@ -51,14 +52,13 @@ class TrainingAudit(Callback):
             raise FloatingPointError(f"Nonfinite loss at batch {batch_idx}")
 
     def on_before_optimizer_step(self, trainer, module, optimizer):
-        if any(p.grad is not None for p in module.model.embedding.parameters()):
-            raise RuntimeError("Frozen NTv3 received gradients")
+        check_trunk_gradients(module.model.embedding, self.finetune_mode)
         if any(p.grad is None or not torch.isfinite(p.grad).all()
                for p in module.model.head.parameters()):
             raise FloatingPointError("Missing or nonfinite head gradients")
 
     def on_train_epoch_end(self, trainer, module):
-        if state_checksum(module.model.embedding) != self.checksum:
+        if self.finetune_mode == "frozen" and state_checksum(module.model.embedding) != self.checksum:
             raise RuntimeError("Frozen NTv3 parameters/non-cache buffers changed")
         if not trainer.is_global_zero:
             return
@@ -66,6 +66,7 @@ class TrainingAudit(Callback):
             status="training", epoch=int(trainer.current_epoch),
             global_step=int(trainer.global_step), batches=len(self.seconds),
             world_size=trainer.world_size,
+            finetune_mode=self.finetune_mode,
             median_train_batch_seconds=float(np.median(self.seconds)),
             elapsed_seconds=time.perf_counter() - self.started,
             metrics={k: float(v) for k, v in trainer.callback_metrics.items()},
@@ -74,6 +75,15 @@ class TrainingAudit(Callback):
 
 def configure_audit(self):
     return [self._ntv3_audit]
+
+
+def check_trunk_gradients(trunk, mode):
+    for name, p in trunk.named_parameters():
+        if mode == "frozen" or not p.requires_grad:
+            if p.grad is not None:
+                raise RuntimeError(f"Frozen parameter received gradients: {name}")
+        elif p.grad is None or not torch.isfinite(p.grad).all():
+            raise FloatingPointError(f"Missing/nonfinite trunk gradient: {name}")
 
 
 def make_validation_loader(self, dataset, batch_size=None, num_workers=None):
@@ -144,6 +154,9 @@ def parse_args():
     parser.add_argument("--max_epochs", type=int, default=40)
     parser.add_argument("--seed", type=int, choices=[17, 29, 43], default=17)
     parser.add_argument("--checkpoint_path", default=None)
+    parser.add_argument("--finetune_mode", choices=["frozen", "full"], default="frozen")
+    parser.add_argument("--gradient_checkpointing", action="store_true")
+    parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     if args.max_epochs < 1 or args.num_workers < 0 or args.batch_size < 1 or args.accumulate_grad_batches < 1:
@@ -168,10 +181,11 @@ def main():
     # Load gated model before touching any sequence or opening data handles.
     params = dict(model_type="NTv3PretrainedProfileModel", n_tasks=4,
                   checkpoint=CHECKPOINT, revision=args.revision,
+                  finetune_mode=args.finetune_mode, gradient_checkpointing=args.gradient_checkpointing,
                   use_bfloat16_compute=device.type == "cuda")
     model = LightningModel(params, dict(task="regression", loss="poisson_multinomial",
-                          total_weight=0.2, freeze_embedding_eval=True,
-                          freeze_embedding_norm_stats=True)).to(device)
+                          total_weight=0.2, freeze_embedding_eval=args.finetune_mode == "frozen",
+                          freeze_embedding_norm_stats=args.finetune_mode == "frozen")).to(device)
     datasets = build_dataset_pair(
         split_name=args.split_name, target_mode="poisson_multinomial", bw_files=bw_files,
         task_names=TASK_NAMES, genome=args.genome, split_dir=Path(args.split_dir),
@@ -184,7 +198,7 @@ def main():
             head.output_projection.weight.normal_(0, 1e-3)
             head.output_projection.bias.copy_(torch.as_tensor(np.log(np.maximum(means, 1e-4)), device=device))
         # Forward-oriented validation window; no RC randomness in qualification.
-        x, y = next(iter(DataLoader(datasets[1], batch_size=1, num_workers=0)))
+        x, y = next(iter(DataLoader(datasets[1], batch_size=args.batch_size if args.dry_run else 1, num_workers=0)))
         x, y = x.to(device), y.to(device)
         if not torch.isfinite(y).all() or (y < 0).any():
             raise ValueError("Invalid validation labels")
@@ -200,8 +214,7 @@ def main():
         if logits.shape != y.shape or not torch.isfinite(logits).all() or not torch.isfinite(loss):
             raise FloatingPointError("Invalid prediction shape or nonfinite logits/loss")
         loss.backward()
-        if any(p.grad is not None for p in model.model.embedding.parameters()):
-            raise RuntimeError("Frozen trunk received gradients")
+        check_trunk_gradients(model.model.embedding, args.finetune_mode)
         if not all(p.grad is not None and torch.isfinite(p.grad).all() for p in head.parameters()):
             raise RuntimeError("Missing or nonfinite head gradients")
         if device.type == "cuda":
@@ -213,6 +226,7 @@ def main():
         import transformers
         result = dict(
             status="stage1_passed", checkpoint=CHECKPOINT, revision=args.revision,
+            finetune_mode=args.finetune_mode, gradient_checkpointing=args.gradient_checkpointing,
             code_revision=CODE_REVISION, seed=args.seed,
             runtime_cache_exclusions=["cos_cached", "sin_cached"],
             split=args.split_name, window="val row 0", task_names=TASK_NAMES,
@@ -235,11 +249,11 @@ def main():
             return
         run_dir = args.out.parent / f"seed{args.seed}"
         model.train_params.update(dict(
-            optimizer="adam", lr=3e-4, batch_size=args.batch_size, num_workers=args.num_workers,
+            optimizer="adam", lr=args.lr if args.lr is not None else (1e-5 if args.finetune_mode == "full" else 3e-4), batch_size=args.batch_size, num_workers=args.num_workers,
             validation_batch_size=1,
             devices=devices,
             precision="bf16-mixed" if device.type == "cuda" else "32-true",
-            accumulate_grad_batches=args.accumulate_grad_batches, clip=1.0, early_stopping=True, patience=3,
+            accumulate_grad_batches=args.accumulate_grad_batches, clip=1.0, early_stopping=args.finetune_mode == "frozen", patience=3,
             monitor="val_loss", mode="min", max_epochs=args.max_epochs,
             logger="csv", save_dir=str(run_dir), name="training",
             checkpoint=dict(dirpath=str(run_dir / "checkpoints"), filename="epoch{epoch:02d}",
@@ -251,13 +265,16 @@ def main():
         del features, logits, loss
         for dataset in datasets:
             dataset.close_handles()
-        audit = TrainingAudit(run_dir / "progress.json", before)
+        audit = TrainingAudit(run_dir / "progress.json", before, args.finetune_mode)
         model._ntv3_audit = audit
         model.configure_callbacks = MethodType(configure_audit, model)
         model.make_test_loader = MethodType(make_validation_loader, model)
         trainer = model.train_on_dataset(datasets[0], datasets[1], args.checkpoint_path)
-        if state_checksum(model.model.embedding) != before:
+        trained_checksum = state_checksum(model.model.embedding)
+        if args.finetune_mode == "frozen" and trained_checksum != before:
             raise RuntimeError("NTv3 changed during training")
+        if args.finetune_mode == "full" and trained_checksum == before:
+            raise RuntimeError("Full finetuning did not update the trunk")
         trainer.strategy.barrier()
         if not trainer.is_global_zero:
             return
@@ -281,10 +298,11 @@ def main():
         with torch.no_grad():
             reloaded = restored(x, logits=True).cpu()
         torch.testing.assert_close(expected, reloaded, rtol=0, atol=0)
-        if state_checksum(restored.model.embedding) != before:
+        if state_checksum(restored.model.embedding) != trained_checksum:
             raise RuntimeError("NTv3 changed after checkpoint reload")
         result.update(
             status="training_passed", stage2="complete", max_epochs=args.max_epochs,
+            lr=model.train_params["lr"],
             completed_epochs=int(trainer.current_epoch), best_checkpoint=best_path,
             last_checkpoint=last_path, best_val_loss=best_score,
             world_size=trainer.world_size, batch_size=args.batch_size,

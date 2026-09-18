@@ -57,11 +57,12 @@ class BaseModel(nn.Module):
 
 
 class NTv3PretrainedProfileModel(BaseModel):
-    """Frozen NTv3-8M plus the fixed local Saijou profile probe."""
+    """NTv3-8M plus the fixed local Saijou profile head."""
 
     def __init__(self, n_tasks, checkpoint="InstaDeepAI/NTv3_8M_pre", revision=None,
                  seq_len=524_288, label_len=196_608, bin_size=32,
-                 use_bfloat16_compute=True):
+                 use_bfloat16_compute=True, finetune_mode="frozen",
+                 gradient_checkpointing=False):
         from grelu.model.heads import NTv3LocalProfileHead
         from grelu.model.trunks.ntv3 import NTv3FeatureTrunk
 
@@ -72,6 +73,7 @@ class NTv3PretrainedProfileModel(BaseModel):
                 checkpoint=checkpoint, revision=revision, seq_len=seq_len,
                 label_len=label_len, bin_size=bin_size,
                 use_bfloat16_compute=use_bfloat16_compute,
+                finetune_mode=finetune_mode, gradient_checkpointing=gradient_checkpointing,
             ),
             head=NTv3LocalProfileHead(),
         )

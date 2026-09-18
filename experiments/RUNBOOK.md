@@ -206,16 +206,27 @@ HF_HUB_OFFLINE=1 CUDA_VISIBLE_DEVICES=0 python src/ft-scripts/train_ntv3.py \
   --max_epochs 1 --out /absolute/new-experiment/tiny50.json
 ```
 
-Full training uses `--split_name split_chr10_chr11 --max_epochs 40 --seed 43`,
+The original frozen run uses `--split_name split_chr10_chr11 --max_epochs 40 --seed 43`,
 per-rank batch size 4, accumulation 2, lr 3e-4, bf16, val-loss early stopping
 with patience 3. `--checkpoint_path` restores optimizer and training state.
 Outputs must be new paths; matching existing label-cache manifests are required.
 The CLI does not silently regenerate train/val caches.
 
+On 2026-09-08 the user stopped the frozen run and requested a fresh full-parameter
+3-epoch experiment. Use `--finetune_mode full --gradient_checkpointing --lr 1e-5`
+with seed43, per-rank batch4, accumulation2 (effective24), and `--max_epochs 3`.
+Full mode starts from the pinned pretrained weights, disables early stopping,
+updates every profile-path backbone parameter plus the head, and excludes only
+the unused original MLM head. It audits finite gradients, actual trunk updates,
+and exact checkpoint prediction reload. Convolution activation checkpointing
+preserves the official forward path and checkpoint keys. Real three-rank tiny50
+qualification passed: 225 train / 14 val windows, 2.129 s/train batch, reload
+max error 0. Single-GPU batch4 forward/backward peak was 35.19 GB (32.78 GiB).
+
 Inspect the current durable pipeline with:
 
 ```bash
-systemctl --user status ntv3-seed43-ddp-b4-20260908 --no-pager
+systemctl --user status ntv3-full3-seed43-20260908 --no-pager
 ```
 
 `pipeline_status.json` is the run state; `seed*/progress.json` is updated per

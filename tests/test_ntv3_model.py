@@ -134,3 +134,46 @@ def test_lightning_checkpoint_reconstruction(fake_loader, tmp_path):
     for name, value in model.state_dict().items():
         torch.testing.assert_close(value, restored.state_dict()[name])
     assert all(not p.requires_grad for p in restored.model.embedding.parameters())
+
+
+def test_full_trunk_gradient_and_checkpoint(monkeypatch, tmp_path):
+    import pytorch_lightning as pl
+    from grelu.lightning import LightningModel
+
+    class Core(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.scale = nn.Parameter(torch.ones(256))
+            self.lm_head = nn.Linear(256, 11)
+
+        def forward(self, input_ids, **kwargs):
+            return {"embeddings_deconv_7": input_ids.float()[:, None, :] * self.scale[None, :, None]}
+
+    class MLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.core = Core()
+            self.config = SimpleNamespace()
+
+        def get_output_embeddings(self):
+            return self.core.lm_head
+
+    monkeypatch.setattr(ntv3, "load_ntv3", lambda *args: (FakeTokenizer(), MLM()))
+    params = dict(model_type="NTv3PretrainedProfileModel", n_tasks=4,
+                  revision=REVISION, finetune_mode="full")
+    model = LightningModel(params, dict(task="regression", loss="poisson_multinomial"))
+    model.train()
+    trunk = model.model.embedding
+    assert trunk.training and trunk.ntv3.training
+    emb = trunk.extract_final_embedding(torch.tensor([[6, 8, 9]]))
+    emb.sum().backward()
+    assert trunk.ntv3.core.scale.grad is not None
+    assert all(not p.requires_grad for p in trunk.ntv3.core.lm_head.parameters())
+    checkpoint = dict(state_dict=model.state_dict(), hyper_parameters=dict(model.hparams),
+                      **{"pytorch-lightning_version": pl.__version__})
+    model.on_save_checkpoint(checkpoint)
+    path = tmp_path / "full.ckpt"
+    torch.save(checkpoint, path)
+    restored = LightningModel.load_from_checkpoint(path)
+    assert restored.model.embedding.finetune_mode == "full"
+    assert restored.model.embedding.ntv3.core.scale.requires_grad

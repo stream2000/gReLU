@@ -1,10 +1,12 @@
-"""Frozen NTv3-8M final embeddings for the fixed Saijou profile geometry.
+"""NTv3-8M final embeddings for frozen or full Saijou profile finetuning.
 
 Remote model code is loaded only on construction, from an immutable revision.
-The projection-input contract must still be qualified on the real checkpoint.
+The official final post-skip deconvolution embedding is used before MLM GELU.
 """
 
 import re
+from contextlib import nullcontext
+from torch.utils.checkpoint import checkpoint as activation_checkpoint
 
 import torch
 from torch import nn
@@ -55,10 +57,11 @@ def load_ntv3(checkpoint, revision, use_bfloat16_compute):
 
 
 class NTv3FeatureTrunk(nn.Module):
-    """Map (B,4,524288) DNA to frozen (B,256,6144) pooled features."""
+    """Map (B,4,524288) DNA to (B,256,6144) pooled features."""
 
     def __init__(self, checkpoint=CHECKPOINT, revision=None, seq_len=SEQ_LEN,
-                 label_len=LABEL_LEN, bin_size=BIN_SIZE, use_bfloat16_compute=True):
+                 label_len=LABEL_LEN, bin_size=BIN_SIZE, use_bfloat16_compute=True,
+                 finetune_mode="frozen", gradient_checkpointing=False):
         super().__init__()
         if checkpoint != CHECKPOINT:
             raise ValueError("The MVP supports only NTv3_8M_pre")
@@ -73,6 +76,9 @@ class NTv3FeatureTrunk(nn.Module):
         self.output_len = label_len // bin_size
         self.pool_factor = bin_size
         self.revision = revision
+        if finetune_mode not in ("frozen", "full"):
+            raise ValueError("finetune_mode must be frozen or full")
+        self.finetune_mode = finetune_mode
         tokenizer, self.ntv3 = load_ntv3(checkpoint, revision, use_bfloat16_compute)
         ids = [tokenizer.convert_tokens_to_ids(base) for base in "ACGTN"]
         if (any(not isinstance(i, int) or not 0 <= i < 11 for i in ids)
@@ -92,14 +98,29 @@ class NTv3FeatureTrunk(nn.Module):
         self.ntv3.config.deconv_layers_to_save = (7,)
         self.ntv3.config.embeddings_layers_to_save = ()
         self.ntv3.config.attention_maps_to_save = []
-        self.ntv3.requires_grad_(False)
+        self.ntv3.requires_grad_(finetune_mode == "full")
+        # The original MLM head is not part of the profile prediction graph.
+        if finetune_mode == "full":
+            self.ntv3.core.lm_head.requires_grad_(False)
+        if gradient_checkpointing and finetune_mode == "full":
+            core = self.ntv3.core
+            modules = [core.stem, *core.deconv_tower_blocks]
+            for block in core.conv_tower_blocks:
+                modules.extend([block.conv, block.res_conv])
+            for module in modules:
+                original = module.forward
+                def forward(*args, _original=original, **kwargs):
+                    if torch.is_grad_enabled():
+                        return activation_checkpoint(_original, *args, use_reentrant=False, **kwargs)
+                    return _original(*args, **kwargs)
+                module.forward = forward
         self.register_state_dict_post_hook(_omit_rotary_runtime_cache)
         self.register_load_state_dict_pre_hook(_clear_rotary_runtime_cache)
         self.train(False)
 
     def train(self, mode=True):
-        # Keep the entire frozen trunk in eval even when BaseModel.train() recurses.
-        super().train(False)
+        # Frozen probes stay in eval; full finetuning follows BaseModel.train().
+        super().train(mode if self.finetune_mode == "full" else False)
         return self
 
     def one_hot_to_input_ids(self, x):
@@ -113,18 +134,16 @@ class NTv3FeatureTrunk(nn.Module):
         ids = self.base_ids[x.argmax(dim=1)]
         return torch.where(total == 0, self.n_id, ids)
 
-    @torch.no_grad()
     def extract_final_embedding(self, input_ids):
-        self.ntv3.eval()
-        outputs = self.ntv3.core(input_ids=input_ids, output_hidden_states=False,
-                                 output_attentions=False)
+        with torch.no_grad() if self.finetune_mode == "frozen" else nullcontext():
+            outputs = self.ntv3.core(input_ids=input_ids, output_hidden_states=False,
+                                     output_attentions=False)
         embedding = outputs["embeddings_deconv_7"].transpose(1, 2)
         expected = (*input_ids.shape, self.out_channels)
         if tuple(embedding.shape) != expected:
             raise ValueError("Final deconv embedding does not match (B,L,256)")
         return embedding
 
-    @torch.no_grad()
     def forward(self, x):
         emb = self.extract_final_embedding(self.one_hot_to_input_ids(x))
         emb = emb[:, self.crop_start:self.crop_end, :].transpose(1, 2)
@@ -134,4 +153,4 @@ class NTv3FeatureTrunk(nn.Module):
         if not torch.isfinite(emb).all():
             raise FloatingPointError("Nonfinite NTv3 features")
         # Head parameters stay fp32; Lightning autocast owns head mixed precision.
-        return emb.detach().float()
+        return emb.detach().float() if self.finetune_mode == "frozen" else emb.float()

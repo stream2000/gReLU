@@ -121,10 +121,12 @@ def main():
                 representation="final_post_skip_deconv_7",
                 head="NTv3LocalProfileHead_86148_parameters",
                 training=dict(loss="poisson_multinomial", total_weight=.2,
-                              optimizer="adam", lr=3e-4, batch_size=records[0].get("batch_size", 1),
-                              accumulate_grad_batches=records[0].get("accumulate_grad_batches", 8), max_epochs=40,
+                              optimizer="adam", lr=records[0].get("lr", 3e-4), batch_size=records[0].get("batch_size", 1),
+                              accumulate_grad_batches=records[0].get("accumulate_grad_batches", 8), max_epochs=records[0]["max_epochs"],
+                              finetune_mode=records[0].get("finetune_mode", "frozen"),
                               world_size=records[0].get("world_size", 1),
-                              early_stopping_patience=3, selection="minimum_val_loss"),
+                              early_stopping_patience=3 if records[0].get("finetune_mode", "frozen") == "frozen" else None,
+                              selection="minimum_val_loss"),
                 split_hashes={split: sha256(split_dir / f"{split}_intervals.bed")
                               for split in ("train", "val", "test")},
                 test_intervals_sha256=sha256(split_dir / "test_intervals.bed"),
@@ -160,10 +162,12 @@ def main():
             raise ValueError("Locked checkpoint changed")
         model = LightningModel.load_from_checkpoint(selected["checkpoint"], map_location="cpu").to(f"cuda:{args.device}")
         if (model.model_params["revision"] != lock["revision"]
-                or model.train_params["max_epochs"] != 40
-                or model.train_params["lr"] != 3e-4
+                or model.train_params["max_epochs"] != record["max_epochs"]
+                or model.train_params["lr"] != record.get("lr", 3e-4)
+                or model.model_params.get("finetune_mode", "frozen") != record.get("finetune_mode", "frozen")
                 or model.train_params["loss"] != "poisson_multinomial"):
             raise ValueError("Locked checkpoint configuration differs from MVP contract")
+        evaluation_checksum = state_checksum(model.model.embedding)
         for split in ("val", "test"):
             dataset = BorzoiMmapSeqDataset(
                 intervals=read_intervals(split_dir / f"{split}_intervals.bed"),
@@ -175,8 +179,8 @@ def main():
                 rows.extend(evaluate(model, dataset, record["train_track_means"], record["seed"], split))
             finally:
                 dataset.close_handles()
-        if state_checksum(model.model.embedding) != record["trunk_checksum_before"]:
-            raise RuntimeError("Frozen trunk changed in locked evaluation")
+        if state_checksum(model.model.embedding) != evaluation_checksum:
+            raise RuntimeError("Trunk changed in locked evaluation")
         del model
         torch.cuda.empty_cache()
     validate_metric_rows(rows, seeds)

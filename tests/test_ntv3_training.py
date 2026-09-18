@@ -89,3 +89,14 @@ def test_validation_batch_is_independent(entrypoints, monkeypatch):
     monkeypatch.setattr(train.LightningModel, "make_test_loader",
                         lambda self, dataset, batch_size, num_workers: batch_size)
     assert train.make_validation_loader(object(), object(), batch_size=8) == 1
+
+
+def test_full_gradient_audit(entrypoints):
+    train, _ = entrypoints
+    trunk = torch.nn.Linear(2, 1)
+    with pytest.raises(FloatingPointError, match="Missing"):
+        train.check_trunk_gradients(trunk, "full")
+    trunk(torch.ones(1, 2)).sum().backward()
+    train.check_trunk_gradients(trunk, "full")
+    with pytest.raises(RuntimeError, match="Frozen"):
+        train.check_trunk_gradients(trunk, "frozen")
