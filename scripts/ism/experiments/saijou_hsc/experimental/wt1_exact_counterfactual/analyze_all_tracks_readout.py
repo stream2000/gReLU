@@ -60,6 +60,48 @@ def load() -> pd.DataFrame:
     return df
 
 
+EXPR = Path("experiments/ism/20261003_hsc_ag_training_data_similarity/prepared/expr_cpm.parquet")
+FLOOR_PCT = 1.0  # |median effect| must exceed 1% to count as up/down
+
+
+def sample_level(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per ENCODE sample (ontology x assay): sign test over motif-destroying variants.
+
+    Mdk expression filter uses measured ENCODE TPM (from the track-similarity
+    prototype), not the model's own prediction.
+    """
+    from scipy.stats import binomtest
+    from statsmodels.stats.multitest import multipletests
+
+    meta = pd.read_parquet(META)
+    meta = meta[meta.output_type == "rna_seq"][["track_index", "ontology_curie"]]
+    tpm = pd.read_parquet(EXPR).loc["Mdk"]
+    d = df[(df.output_type == "rna_seq") & (df.motif == "destroyed")].merge(meta, on="track_index")
+    d["sample_id"] = "encode|" + d.assay_title + "|" + d.ontology_curie
+    s = d.groupby(["locus_id", "readout", "sample_id", "biosample", "mutation_id"]).lfc.mean().reset_index()
+    rows = []
+    for (loc, ro, sid, bio), g in s.groupby(["locus_id", "readout", "sample_id", "biosample"]):
+        up = int((g.lfc > 0).sum())
+        rows.append(dict(locus=loc, readout=ro, sample_id=sid, biosample=bio, tpm=tpm.get(sid, np.nan),
+                         n=len(g), median_pct=100 * (2 ** g.lfc.median() - 1), frac_up=up / len(g),
+                         p=binomtest(up, len(g)).pvalue))
+    t = pd.DataFrame(rows)
+    out = []
+    for thr in (1, 10, 30):
+        for (loc, ro), g in t[t.tpm >= thr].groupby(["locus", "readout"]):
+            q = multipletests(g.p, method="fdr_bh")[1]
+            cls = np.where((q < 0.05) & (g.median_pct > FLOOR_PCT) & (g.frac_up > 0.5), "up",
+                           np.where((q < 0.05) & (g.median_pct < -FLOOR_PCT) & (g.frac_up < 0.5), "down", "flat"))
+            out.append(dict(tpm_min=thr, locus=loc, readout=ro, samples=len(g), up=int((cls == "up").sum()),
+                            flat=int((cls == "flat").sum()), down=int((cls == "down").sum()),
+                            median_of_medians_pct=float(g.median_pct.median())))
+            if thr == 10:
+                t.loc[g.index, "q_tpm10"] = q
+                t.loc[g.index, "class_tpm10"] = cls
+    t.to_csv(RUN / "sample_level_tpm_filtered.tsv", sep="\t", index=False)
+    return pd.DataFrame(out)
+
+
 def main() -> None:
     df = load()
     thr = df.drop_duplicates(["readout", "output_type", "track_index"]).groupby(["readout", "output_type"]).ref.quantile(0.25)
@@ -79,7 +121,9 @@ def main() -> None:
     ).reset_index()
     s.to_csv(RUN / "track_summary.tsv", sep="\t", index=False)
     df.to_parquet(RUN / "variant_track_effects.parquet")
-    print(s.groupby(["locus_id", "motif", "readout", "output_type"]).size())
+    counts = sample_level(df)
+    counts.to_csv(RUN / "sample_level_counts.tsv", sep="\t", index=False)
+    print(counts.to_string(index=False))
 
 
 if __name__ == "__main__":
