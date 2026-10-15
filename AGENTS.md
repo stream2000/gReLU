@@ -2,6 +2,11 @@
 
 Last updated: 2026-10-15.
 
+**Archived 2026-10-15.** This repository is read-only; new work lives in
+`/work2/Users/qijun/gReLU-clustering` (branch `dev`). Start from
+[ARCHIVE.md](ARCHIVE.md) to find code, results, and artifacts. The rest of this
+guide describes how the repository was operated before archiving.
+
 This is the concise operating guide for the shared checkout:
 
 ```text

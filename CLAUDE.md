@@ -3,6 +3,8 @@
 Read [AGENTS.md](AGENTS.md). It is the guide for this repository and applies to
 Claude Code as written; this file exists only to point at it.
 
+This repository is archived; see [ARCHIVE.md](ARCHIVE.md) first.
+
 Nested guides take precedence for their own subtree:
 
 - `src/alphagenome_pytorch/CLAUDE.md` — submodule architecture, commands, tests.

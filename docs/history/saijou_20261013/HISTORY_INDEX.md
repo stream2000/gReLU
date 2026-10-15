@@ -11,7 +11,7 @@ the code, data, and evidence; do not extend these workflows.
 | Code (frozen in place) | `scripts/ism/experiments/saijou_hsc/` — see `WORKFLOW_INDEX.md` there |
 | Last uncommitted WT1 edits | commit `a1e4d46` (`--weights`, `--run`, `compare_checkpoints.py`, README) |
 | Run artifacts (~190 GB, 75 entries) | `/work3/Users/qijun/gReLU-history/saijou-20261013/ism/<name>/` |
-| Old artifact paths | `experiments/ism/<name>` is a symlink to the `/work3` copy |
+| Old artifact paths | `experiments/ism/<name>` still holds the original copy on `/work2`; the symlink swap (`migrate_saijou.sh swap`) has not been run as of 2026-10-15 |
 | Mapping | `artifact_locations.tsv` next to this file |
 | Not migrated | `experiments/ism/20261003_hsc_ag_training_data_similarity/` (WT1 TPM sign test reads its `prepared/expr_cpm.parquet`) |
 | Ignored legacy code | `scripts/ism/experiments/saijou_hsc/archive/` (main checkout only, not in Git) |
