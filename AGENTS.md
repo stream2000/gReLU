@@ -1,6 +1,6 @@
 # gReLU Replication Agent Guide
 
-Last updated: 2026-09-18.
+Last updated: 2026-10-15.
 
 This is the concise operating guide for the shared checkout:
 
@@ -40,8 +40,8 @@ activation in launchers.
 - AlphaGenome integration lives under `src/grelu/model/trunks/alphagenome.py`
   and `src/alphagenome_pytorch/`.
 - The reusable saturation ISM core lives under `src/grelu/interpret/ism/`.
-- Saijou model-case workflows live under
-  `scripts/ism/experiments/saijou_hsc/`.
+- The closed Saijou model case is frozen under
+  `scripts/ism/experiments/saijou_hsc/` (see below).
 - Inspect the live tree before referring to code from another worktree or
   branch.
 - Existing dirty-worktree changes belong to the user. Preserve them and stage
@@ -68,28 +68,24 @@ already validated coordinate manifest does not require another approval.
 The purpose of this gate is to prevent silent coordinate assumptions, not to
 trigger broad or repetitive coordinate checking.
 
-## Saijou workflow rules
+## Saijou (closed 2026-10-13)
 
-Read these before adding or moving Saijou analysis code:
+The Saijou HSC case and WT1 follow-up are closed. Their code is frozen under
+`scripts/ism/experiments/saijou_hsc/`; their run artifacts live on `/work3`,
+and `experiments/ism/<name>` symlinks point there. Start from
+`docs/history/saijou_20261013/HISTORY_INDEX.md`. Don't add new work to these
+workflows; build new phases on the generic core in `src/grelu/interpret/ism/`.
 
-```text
-scripts/ism/experiments/saijou_hsc/WORKFLOW_INDEX.md
-scripts/ism/experiments/saijou_hsc/ANALYSIS_HARNESS.md
-```
+The layering rules from that case still apply to new analysis code:
 
-The maintained baseline is the canonical nine-gene workflow plus the focused
-audited Mdk workflow.
-
-- Treat scan width, transcript authority, ranking profile, motif threshold, and
-  report layout as parameters or versioned configuration, not new parallel
-  workflows.
+- Treat scan width, ranking profile, thresholds, and report layout as
+  parameters or versioned configuration, not new parallel workflows.
 - Keep inference, reusable analysis, validated TSV/JSON interfaces, and report
-  rendering as separate layers.
-- Report renderers consume validated analysis outputs; they do not recompute
-  scientific results from raw model files.
-- New unvalidated investigations belong under `experimental/<topic>/`.
-  Promote reusable logic only after its metric contract, schema checks,
-  synthetic tests, and saved-artifact validation are documented.
+  rendering as separate layers. Renderers consume validated outputs; they do
+  not recompute results from raw model files.
+- Unvalidated investigations start in an `experimental/<topic>/` directory and
+  move into core only with a metric contract, schema checks, synthetic tests,
+  and saved-artifact validation.
 
 `docs/saturation_ism_framework_design.md` records framework and migration
 rationale. Use the live workflow index, tests, and code as implementation
@@ -105,7 +101,8 @@ authority for retention and compaction; do not turn unrelated tasks into
 Progress maintenance.
 
 Canonical analysis tables, figures, and PDFs stay in their experiment output
-directory. For a final PDF deliverable, also place a clearly named convenience
+directory. Large inputs, checkpoints, and closed runs belong on `/work3`
+(`/work2` is shared and nearly full). For a final PDF deliverable, also place a clearly named convenience
 copy in `/home/fqijun/report` without replacing the canonical artifact.
 
 ## Verification and commits

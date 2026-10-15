@@ -1,8 +1,13 @@
 # Saijou HSC ISM workflow index
 
-This directory keeps only the code needed for the current biological question:
-which TSS-proximal bases or motif families drive the Saijou HSC prediction,
-with matched AlphaGenome/Borzoi and original/fine-tuned comparisons.
+**Closed 2026-10-13. This code is frozen.** Run artifacts moved to `/work3`
+(`experiments/ism/<name>` symlinks point there). See
+`docs/history/saijou_20261013/HISTORY_INDEX.md`. This page records how the case
+was run, not a maintained baseline.
+
+The case asked which TSS-proximal bases or motif families drive the Saijou HSC
+prediction, with matched AlphaGenome/Borzoi and original/fine-tuned
+comparisons.
 
 ## Canonical nine-gene workflow
 
