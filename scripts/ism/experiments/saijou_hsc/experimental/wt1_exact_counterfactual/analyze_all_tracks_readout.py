@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 ROOT = Path("experiments/ism/20260918_1349_wt1_exact_counterfactual")
-RUN = ROOT / "runs/alphagenome_original_all_tracks"
+RUN = ROOT / "runs/alphagenome_original_all_tracks"  # override with --run
 META = Path("src/alphagenome_pytorch/src/alphagenome_pytorch/data/track_metadata_mouse.parquet")
 DZ = 0.005  # |log2FC| <= DZ counts as unchanged (~0.35%)
 
@@ -103,6 +103,11 @@ def sample_level(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main() -> None:
+    import argparse
+    global RUN
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--run", type=Path, default=RUN)
+    RUN = ap.parse_args().run
     df = load()
     thr = df.drop_duplicates(["readout", "output_type", "track_index"]).groupby(["readout", "output_type"]).ref.quantile(0.25)
     df["readable"] = df.ref >= df.set_index(["readout", "output_type"]).index.map(thr)

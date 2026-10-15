@@ -68,6 +68,8 @@ def main() -> None:
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--n-shards", type=int, default=1)
     ap.add_argument("--out", type=Path, default=ROOT / "runs/alphagenome_original_all_tracks")
+    ap.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS,
+                    help="AlphaGenome checkpoint; default is fold_0, model_all_folds is the distilled release")
     ap.add_argument("--mutation-ids", type=Path, default=None, help="optional subset, one id per line")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -77,7 +79,7 @@ def main() -> None:
 
     model = LightningModel(
         model_params={"model_type": "AlphaGenomeModel", "output_key": HEADS,
-                      "weights_path": str(DEFAULT_WEIGHTS),
+                      "weights_path": str(args.weights),
                       "dtype_policy": DtypePolicy.mixed_precision(), "resolution": RES,
                       "organism_index": 1, "num_organisms": 2},
         train_params={"task": "regression", "loss": "mse"},
@@ -122,7 +124,7 @@ def main() -> None:
              mutation_id=man.mutation_id.to_numpy(), readouts=np.array(READOUTS))
     pd.DataFrame(channels, columns=["output_type", "track_index"]).to_csv(
         args.out / "channels.tsv", sep="\t", index=False)
-    json.dump({"weights": str(DEFAULT_WEIGHTS), "heads": HEADS, "exons": MDK_EXONS,
+    json.dump({"weights": str(args.weights), "heads": HEADS, "exons": MDK_EXONS,
                "tss": MDK_TSS, "resolution_bp": RES, "seq": [CHROM, SEQ_START, SEQ_END]},
               open(args.out / "run_metadata.json", "w"), indent=2)
     print("done", flush=True)
