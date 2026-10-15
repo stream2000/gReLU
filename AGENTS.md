@@ -1,21 +1,22 @@
-# gReLU Replication Agent Guide
+# gReLU Clustering Agent Guide
 
 Last updated: 2026-10-15.
 
-This is the concise operating guide for the shared checkout:
+Checkout:
 
 ```text
-/work2/Users/qijun/gReLU-replication
+/work2/Users/qijun/gReLU-clustering
 ```
 
-`/home/fqijun/python/gReLU-replication` may be a symlink to the same checkout.
-Verify the live branch and worktree instead of relying on an older branch
-description.
+This repository starts a new phase from the saturation ISM infrastructure of
+`gReLU-replication`. It was cloned from that repository's `alphagenome` branch
+(commit `8409dfe`) on 2026-10-15 and trimmed to the ISM core; Git history is
+kept.
 
 ## Start here
 
 ```bash
-cd /work2/Users/qijun/gReLU-replication
+cd /work2/Users/qijun/gReLU-clustering
 git status --short
 source activate.sh
 python - <<'PY'
@@ -24,28 +25,34 @@ print(grelu.__file__)
 PY
 ```
 
-The expected import is:
+The expected import is
+`/work2/Users/qijun/gReLU-clustering/src/grelu`. `activate.sh` is the single
+environment entry point: it activates the shared user-home `grelu_dev` conda
+environment and prepends this checkout's `src/` and the AlphaGenome submodule
+to `PYTHONPATH`. Without it, `import grelu` can resolve to another checkout.
 
-```text
-/work2/Users/qijun/gReLU-replication/src/grelu
-```
+## What is here
 
-`activate.sh` is the single environment entry point. It defaults to the
-user-home `grelu_dev` environment and prepends this checkout's `src/` to
-`PYTHONPATH`. Use its supported host overrides instead of duplicating conda
-activation in launchers.
+- `src/grelu/interpret/ism/`: generic saturation ISM runner, mutation sets,
+  profiles/readouts, shards, validation, and model adapters for the original
+  (pretrained) AlphaGenome and Borzoi models.
+- `src/grelu/model/`: model trunks (AlphaGenome, Borzoi, NTv3, ...).
+- `src/alphagenome_pytorch/`: submodule; its own `CLAUDE.md` applies there.
+- `tests/`: library tests plus the ISM core tests
+  (`test_saturation_ism_core.py`, `test_ism_*.py`, `test_saijou_targeted_*.py`).
 
-## Repository scope
+There is no experiment runner script yet. New phase entry points go under
+`scripts/` and build on `grelu.interpret.ism`.
 
-- AlphaGenome integration lives under `src/grelu/model/trunks/alphagenome.py`
-  and `src/alphagenome_pytorch/`.
-- The reusable saturation ISM core lives under `src/grelu/interpret/ism/`.
-- The closed Saijou model case is frozen under
-  `scripts/ism/experiments/saijou_hsc/` (see below).
-- Inspect the live tree before referring to code from another worktree or
-  branch.
-- Existing dirty-worktree changes belong to the user. Preserve them and stage
-  only files that belong to the current task.
+## History (read-only)
+
+The Saijou HSC / WT1 phase is closed. Its code, docs, training scripts, and
+reports remain in `/work2/Users/qijun/gReLU-replication` (frozen, branch
+`alphagenome`); start from `docs/history/saijou_20261013/HISTORY_INDEX.md`
+there. Run artifacts are on `/work3/Users/qijun/gReLU-history/saijou-20261013/`.
+The fine-tuned (LoRA) Saijou adapters and checkpoints were not carried over;
+they live in that checkout (`src/grelu/interpret/ism/model_adapters/*_finetuned.py`,
+`src/ft-scripts/`, `runs/`). Read from these locations; don't write into them.
 
 ## Coordinate approval gate
 
@@ -65,18 +72,7 @@ Clarify again only if a contract field changes, sources conflict, or a new
 coordinate interpretation is required. Pure propagation or re-export of an
 already validated coordinate manifest does not require another approval.
 
-The purpose of this gate is to prevent silent coordinate assumptions, not to
-trigger broad or repetitive coordinate checking.
-
-## Saijou (closed 2026-10-13)
-
-The Saijou HSC case and WT1 follow-up are closed. Their code is frozen under
-`scripts/ism/experiments/saijou_hsc/`; their run artifacts live on `/work3`,
-and `experiments/ism/<name>` symlinks point there. Start from
-`docs/history/saijou_20261013/HISTORY_INDEX.md`. Don't add new work to these
-workflows; build new phases on the generic core in `src/grelu/interpret/ism/`.
-
-The layering rules from that case still apply to new analysis code:
+## Layering rules
 
 - Treat scan width, ranking profile, thresholds, and report layout as
   parameters or versioned configuration, not new parallel workflows.
@@ -86,41 +82,30 @@ The layering rules from that case still apply to new analysis code:
 - Unvalidated investigations start in an `experimental/<topic>/` directory and
   move into core only with a metric contract, schema checks, synthetic tests,
   and saved-artifact validation.
+- Don't make paths part of the API: locate inputs through arguments or config,
+  not `Path(__file__).parents[n]` or checkout-relative paths.
 
-`docs/saturation_ism_framework_design.md` records framework and migration
-rationale. Use the live workflow index, tests, and code as implementation
-authority.
+## Known debts in the ISM core
 
-## Progress and artifacts
+- Resume accepts an old output whose row count matches, without confirming it
+  came from the same checkpoint, manifest, track order, or pseudocount
+  (`gene_runner.py` resume path, `shards.py` `PROVENANCE_KEYS`). Add a run
+  fingerprint before relying on resume.
 
-`experiments/Progress.md` is the status-sensitive handoff, not required reading
-for every task. Read it before reporting current project state or changing an
-active experiment. Record only material, validated results and link detailed
-experiment-local summaries. Its own `History and update rule` section is the
-authority for retention and compaction; do not turn unrelated tasks into
-Progress maintenance.
+## Artifacts
 
-Canonical analysis tables, figures, and PDFs stay in their experiment output
-directory. Large inputs, checkpoints, and closed runs belong on `/work3`
-(`/work2` is shared and nearly full). For a final PDF deliverable, also place a clearly named convenience
-copy in `/home/fqijun/report` without replacing the canonical artifact.
+Large inputs, checkpoints, and run outputs belong on `/work3` (`/work2` is
+shared and nearly full); `experiments/`, `runs/`, and `dataset_store/` are
+ignored by Git. For a final PDF deliverable, also place a clearly named copy in
+`/home/fqijun/report`.
 
 ## Verification and commits
 
-Use validation proportional to the change. Run focused tests for the touched
-entry points; for Saijou changes, also validate saved TSV/JSON interfaces.
-Always run `git diff --check` before a commit.
-
-Commit only the intended scope. Do not include generated experiment outputs,
-cache files, unrelated user changes, or local Progress archives.
+Use validation proportional to the change and run focused tests for the touched
+entry points. Always run `git diff --check` before a commit. Commit only the
+intended scope; no generated outputs or cache files. Existing dirty-worktree
+changes belong to the user.
 
 ## Task-specific documentation
 
-Load only the branch relevant to the task; do not preload this entire map.
-
 - `SETUP_GUIDE.md`: AlphaGenome environment and inference setup.
-- `experiments/RUNBOOK.md`: Saijou fine-tuning and NTv3 MVP operations.
-- `scripts/README.md`: benchmark/script overview.
-- `docs/project_scientific_question_audit_zh.md`:
-  historical question/scope audit with an evidence cutoff of 2026-07-28; do
-  not use it as the current evidence summary.

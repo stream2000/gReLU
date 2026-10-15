@@ -7,5 +7,3 @@ Nested guides take precedence for their own subtree:
 
 - `src/alphagenome_pytorch/CLAUDE.md` — submodule architecture, commands, tests.
   Its commands are relative to that directory, not the repository root.
-- `docs/history/saijou_20261013/HISTORY_INDEX.md` — the Saijou case is closed;
-  read this before touching its frozen code or artifacts.
