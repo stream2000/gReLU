@@ -1,4 +1,5 @@
 # Temporary and binary files
+/.env
 *~
 *.py[cod]
 *.so
@@ -54,3 +55,32 @@ MANIFEST
 .python-version
 
 lightning_logs*
+
+# Script output artifacts
+comparison_*.png
+*.png
+/ism_results/
+/eval_data/
+
+# Local ignored docs
+agent-doc/
+/agent-doc/plan&reports/
+/agent-doc/ref/
+/results/
+/scripts/eqtl/results_all_tissues/
+/scripts/eqtl/ref/
+
+# Local replication artifacts
+/bigwig
+/dataset_store/
+/experiments/*
+/AGENTS.md
+/runs/
+/referrence/
+
+# Local history for superseded Saijou ISM implementations. The tracked
+# WORKFLOW_INDEX.md records why each file was archived and its replacement.
+/scripts/ism/experiments/saijou_hsc/archive/
+
+# Scratch changelog kept locally; AGENTS.md points to experiments/Progress.md instead.
+/MEMORY.md

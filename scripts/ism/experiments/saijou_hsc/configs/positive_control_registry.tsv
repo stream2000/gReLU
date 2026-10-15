@@ -1,0 +1,8 @@
+control_id	gene	family	label	start	end	evidence	coordinate_rule
+acta2_srf_carg	Acta2	SRF_CARG	SRF/CArG	1294	1303	registered_exact_native_motif	previously registered mouse native CArG on the designated transcript
+col1a1_smad3_smad4	Col1a1	SMAD	SMAD3/4	136	145	wet_pair_best_promoter_JASPAR_hit	strongest JASPAR2024 SMAD-family hit at p<=1e-4 within -500..+200
+col1a2_smad3	Col1a2	SMAD	SMAD3/4 reported interval	-916	-908	registered_reported_interval	previously registered mouse interval; no significant native SMAD-family JASPAR hit
+col1a1_ap1	Col1a1	AP1	AP-1 (Jun/Fos/Fosl1)	72	82	wet_pair_best_promoter_JASPAR_hit	strongest JASPAR2024 AP-1-family hit at p<=1e-4 within -500..+200
+col1a2_ap1	Col1a2	AP1	AP-1 (Jun/Fos/Fosl1)	1294	1301	wet_pair_best_3kb_JASPAR_hit	no promoter hit; strongest JASPAR2024 AP-1-family hit at p<=1e-4 within -1500..+1500
+timp1_ap1	Timp1	AP1	AP-1 (Jun/Fos/Fosl1)	25	33	wet_pair_best_promoter_JASPAR_hit	strongest JASPAR2024 AP-1-family hit at p<=1e-4 within -500..+200
+col1a1_sp1_klf6	Col1a1	KLF_SP_GC	SP1/KLF6 family	102	110	wet_pair_best_promoter_JASPAR_family_hit	strongest JASPAR2024 SP/KLF-family hit at p<=1e-4 within -500..+200

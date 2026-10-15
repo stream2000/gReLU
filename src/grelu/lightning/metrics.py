@@ -9,7 +9,6 @@ per task, which can optionally be averaged across tasks by setting average=True.
 
 import numpy as np
 import torch
-import torchmetrics
 from sklearn.metrics import precision_recall_curve
 from torchmetrics import Metric
 from torchmetrics.utilities.checks import _check_same_shape
@@ -73,6 +72,17 @@ class BestF1(Metric):
             return output
 
 
+def _log1p_transform(x: torch.Tensor) -> torch.Tensor:
+    """Compress coverage-scale values before a metric consumes them.
+
+    Track targets here are CPM-style counts whose dynamic range spans several
+    orders of magnitude, so raw-scale metrics are decided almost entirely by a
+    handful of peak bins. Negative values are clamped away because both the
+    softplus-activated predictions and the coverage targets are non-negative.
+    """
+    return torch.log1p(x.clamp(min=0.0))
+
+
 class MSE(Metric):
     """
     Metric class to calculate the MSE for each task.
@@ -81,6 +91,9 @@ class MSE(Metric):
         num_outputs: Number of tasks
         average: If true, return the average metric across tasks.
             Otherwise, return a separate value for each task
+        log_transform: If True, apply log1p to predictions and targets before
+            computing the error. Use this for coverage-scale targets, where the
+            raw-scale MSE is dominated by a few peak bins.
 
     As input to forward and update the metric accepts the following input:
         preds: Predictions of shape (N, n_tasks, L)
@@ -90,13 +103,19 @@ class MSE(Metric):
         output: A tensor with the MSE
     """
 
-    def __init__(self, num_outputs: int = 1, average: bool = True) -> None:
+    def __init__(
+        self,
+        num_outputs: int = 1,
+        average: bool = True,
+        log_transform: bool = False,
+    ) -> None:
         super().__init__()
         self.add_state(
             "sum_squared_error", default=torch.zeros(num_outputs), dist_reduce_fx="sum"
         )
         self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
         self.average = average
+        self.log_transform = log_transform
 
     def update(self, preds: torch.Tensor, target: torch.Tensor) -> None:
         _check_same_shape(preds, target)
@@ -105,7 +124,13 @@ class MSE(Metric):
         else:
             self.total += len(target)
 
-        diff = preds.to(torch.float32) - target.to(torch.float32)  # (N, n_tasks, L)
+        preds = preds.to(torch.float32)
+        target = target.to(torch.float32)
+        if self.log_transform:
+            preds = _log1p_transform(preds)
+            target = _log1p_transform(target)
+
+        diff = preds - target  # (N, n_tasks, L)
         self.sum_squared_error += diff.square().sum(axis=0).mean(axis=-1)
 
     def compute(self) -> torch.Tensor:
@@ -123,10 +148,19 @@ class PearsonCorrCoef(Metric):
     """
     Metric class to calculate the Pearson correlation coefficient for each task.
 
+    Accumulation uses float64 sufficient statistics. Coverage targets reach
+    ~4e4 while most bins are zero, and a float32 running correlation loses
+    enough precision on that range to report a NaN variance for the whole
+    validation set.
+
     Args:
         num_outputs: Number of tasks
         average: If true, return the average metric across tasks.
             Otherwise, return a separate value for each task
+        log_transform: If True, apply log1p to predictions and targets before
+            correlating. On coverage-scale targets the raw-scale coefficient
+            saturates near 1 for any model that merely places the peaks, so
+            the log-scale variant is the one that tracks training progress.
 
     As input to forward and update the metric accepts the following input:
         preds: Predictions of shape (N, n_tasks, L)
@@ -136,26 +170,63 @@ class PearsonCorrCoef(Metric):
         output: A tensor with the Pearson coefficient.
     """
 
-    def __init__(self, num_outputs: int = 1, average: bool = True) -> None:
+    def __init__(
+        self,
+        num_outputs: int = 1,
+        average: bool = True,
+        log_transform: bool = False,
+    ) -> None:
         super().__init__()
-        self.pearson = torchmetrics.PearsonCorrCoef(num_outputs=num_outputs)
+        zeros = torch.zeros(num_outputs, dtype=torch.float64)
+        for name in ("sum_x", "sum_y", "sum_xx", "sum_yy", "sum_xy"):
+            self.add_state(name, default=zeros.clone(), dist_reduce_fx="sum")
+        self.add_state(
+            "n_obs", default=torch.zeros(1, dtype=torch.float64), dist_reduce_fx="sum"
+        )
+        self.num_outputs = num_outputs
         self.average = average
+        self.log_transform = log_transform
 
     def update(self, preds: torch.Tensor, target: torch.Tensor) -> None:
+        _check_same_shape(preds, target)
         preds = (
-            preds.swapaxes(1, 2).flatten(start_dim=0, end_dim=1).to(torch.float32)
-        )  # Nx L, n_tasks
+            preds.swapaxes(1, 2).flatten(start_dim=0, end_dim=1).to(torch.float64)
+        )  # N*L, n_tasks
         target = (
-            target.swapaxes(1, 2).flatten(start_dim=0, end_dim=1).to(torch.float32)
-        )  # Nx L, n_tasks
-        self.pearson.update(preds, target)
+            target.swapaxes(1, 2).flatten(start_dim=0, end_dim=1).to(torch.float64)
+        )  # N*L, n_tasks
+        if self.log_transform:
+            preds = _log1p_transform(preds)
+            target = _log1p_transform(target)
+
+        self.sum_x += preds.sum(dim=0)
+        self.sum_y += target.sum(dim=0)
+        self.sum_xx += preds.square().sum(dim=0)
+        self.sum_yy += target.square().sum(dim=0)
+        self.sum_xy += (preds * target).sum(dim=0)
+        self.n_obs += preds.shape[0]
 
     def compute(self) -> torch.Tensor:
-        output = self.pearson.compute()
+        n = self.n_obs
+        if float(n) < 2:
+            output = torch.full(
+                (self.num_outputs,), float("nan"), dtype=torch.float64
+            )
+        else:
+            cov = self.sum_xy / n - (self.sum_x / n) * (self.sum_y / n)
+            var_x = self.sum_xx / n - (self.sum_x / n).square()
+            var_y = self.sum_yy / n - (self.sum_y / n).square()
+            denominator = (var_x.clamp(min=0.0) * var_y.clamp(min=0.0)).sqrt()
+            # A constant prediction or a constant target leaves the coefficient
+            # undefined; report NaN for that task rather than a divide-by-zero.
+            output = torch.where(
+                denominator > 0,
+                cov / denominator,
+                torch.full_like(cov, float("nan")),
+            ).clamp(-1.0, 1.0)
+
+        output = output.to(torch.float32)
         if self.average:
             return output.mean()
         else:
             return output
-
-    def reset(self) -> None:
-        self.pearson.reset()

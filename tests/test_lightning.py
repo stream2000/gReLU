@@ -293,7 +293,9 @@ def test_lightning_model_train_on_dataset():
     )
     assert list(single_task_reg_model.performance["val"].keys()) == [
         "val_mse",
+        "val_mse_log1p",
         "val_pearson",
+        "val_pearson_log1p",
     ]
 
 
@@ -302,7 +304,10 @@ def test_lightning_model_test_on_dataset():
         dataset=interval_dataset, devices="cpu"
     )
     assert metrics.index == ["label"]
-    assert np.all(metrics.columns == ["test_mse", "test_pearson"])
+    assert np.all(
+        metrics.columns
+        == ["test_mse", "test_mse_log1p", "test_pearson", "test_pearson_log1p"]
+    )
     assert single_task_reg_model.data_params["test"]["max_pair_shift"] == 0
     assert single_task_reg_model.data_params["test"]["max_seq_shift"] == 0
     assert single_task_reg_model.data_params["test"]["n_augmented"] == 1
@@ -315,7 +320,9 @@ def test_lightning_model_test_on_dataset():
     )
     assert list(single_task_reg_model.performance["test"].keys()) == [
         "test_mse",
+        "test_mse_log1p",
         "test_pearson",
+        "test_pearson_log1p",
     ]
 
 
@@ -473,3 +480,86 @@ def test_input_intervals_to_output_bins_cropped_warning():
         assert "cropped-out region" in str(w[0].message)
     # Values are still returned (warning, not error)
     assert (output["start"] < 0).any()
+
+
+def test_pearson_survives_coverage_scale_targets():
+    """Coverage-scale magnitudes must not collapse the correlation to NaN.
+
+    Track targets reach ~4e4 CPM while most bins are zero. A float32 running
+    correlation loses enough precision on that range to report a NaN variance
+    for the whole validation set, which silently blanks the metric for an
+    entire training run.
+    """
+    from grelu.lightning.metrics import PearsonCorrCoef
+
+    generator = torch.Generator().manual_seed(0)
+    target = torch.zeros(64, 2, 512)
+    peaks = torch.randint(0, 512, (64, 2, 8), generator=generator)
+    target.scatter_(2, peaks, torch.rand(64, 2, 8, generator=generator) * 4e4)
+    preds = target * 0.9 + torch.rand(target.shape, generator=generator)
+
+    metric = PearsonCorrCoef(num_outputs=2, average=False)
+    for start in range(0, len(target), 8):
+        metric.update(preds[start : start + 8], target[start : start + 8])
+    observed = metric.compute().numpy()
+
+    assert np.isfinite(observed).all(), observed
+    flat_preds = preds.swapaxes(1, 2).flatten(0, 1).numpy().astype(np.float64)
+    flat_target = target.swapaxes(1, 2).flatten(0, 1).numpy().astype(np.float64)
+    expected = [
+        np.corrcoef(flat_preds[:, i], flat_target[:, i])[0, 1] for i in range(2)
+    ]
+    np.testing.assert_allclose(observed, expected, atol=1e-5)
+
+
+def test_log1p_metrics_separate_peak_only_predictions():
+    """The log-scale pair must distinguish profile fit from peak placement.
+
+    On raw coverage the correlation saturates near 1 for any model that merely
+    puts the peaks in the right places, so it cannot track training progress.
+    """
+    from grelu.lightning.metrics import MSE, PearsonCorrCoef
+
+    # Mirror the real coverage distribution: ~80% hard zeros, and non-zero
+    # bins spread over several decades. A background that spans decades is
+    # what makes the log-scale metric informative.
+    generator = torch.Generator().manual_seed(1)
+    occupied = (torch.rand(32, 1, 512, generator=generator) > 0.8).float()
+    target = occupied * torch.exp(
+        torch.randn(32, 1, 512, generator=generator) * 2.5 + 1.0
+    )
+    peak_only = torch.where(
+        target > target.quantile(0.99), target, torch.zeros_like(target)
+    )
+
+    def pearson(preds, log_transform):
+        metric = PearsonCorrCoef(
+            num_outputs=1, average=False, log_transform=log_transform
+        )
+        metric.update(preds, target)
+        # torchmetrics squeezes a single-task result to a 0-dim tensor.
+        return float(metric.compute())
+
+    # Raw scale cannot tell a peaks-only model apart from a perfect one.
+    assert pearson(peak_only, log_transform=False) > 0.99
+    assert pearson(target, log_transform=False) > 0.999
+    # Log scale separates them by a wide margin.
+    assert pearson(peak_only, log_transform=True) < 0.7
+    assert pearson(target, log_transform=True) > 0.999
+
+    # log1p also keeps the error on an interpretable scale.
+    raw = MSE(num_outputs=1, average=False, log_transform=False)
+    raw.update(peak_only, target)
+    logged = MSE(num_outputs=1, average=False, log_transform=True)
+    logged.update(peak_only, target)
+    assert float(raw.compute()) > 50.0
+    assert float(logged.compute()) < 5.0
+
+
+def test_pearson_reports_nan_for_constant_prediction():
+    from grelu.lightning.metrics import PearsonCorrCoef
+
+    target = torch.rand(8, 1, 64)
+    metric = PearsonCorrCoef(num_outputs=1, average=False)
+    metric.update(torch.ones_like(target), target)
+    assert np.isnan(metric.compute().numpy()).all()

@@ -197,6 +197,20 @@ class LightningModel(pl.LightningModule):
                     "pearson": PearsonCorrCoef(
                         num_outputs=self.model.head.n_tasks, average=False
                     ),
+                    # Coverage-scale targets span several orders of magnitude,
+                    # so the raw-scale pair above is set by a few peak bins.
+                    # The log-scale pair is what separates a model that fits
+                    # the whole profile from one that only places the peaks.
+                    "mse_log1p": MSE(
+                        num_outputs=self.model.head.n_tasks,
+                        average=False,
+                        log_transform=True,
+                    ),
+                    "pearson_log1p": PearsonCorrCoef(
+                        num_outputs=self.model.head.n_tasks,
+                        average=False,
+                        log_transform=True,
+                    ),
                 }
             )
 
@@ -322,8 +336,29 @@ class LightningModel(pl.LightningModule):
             on_step=True,
             on_epoch=True,
             prog_bar=True,
+            sync_dist=True,
         )
         return loss
+
+    def _freeze_embedding_training_state(self) -> None:
+        embedding = getattr(self.model, "embedding", None)
+        if embedding is None:
+            return
+        if self.train_params.get("freeze_embedding_eval", False):
+            embedding.eval()
+            return
+        if not self.train_params.get("freeze_embedding_norm_stats", False):
+            return
+        norm_types = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.SyncBatchNorm)
+        for module in embedding.modules():
+            if isinstance(module, norm_types):
+                module.eval()
+
+    def on_train_epoch_start(self) -> None:
+        self._freeze_embedding_training_state()
+
+    def on_train_batch_start(self, batch: Tensor, batch_idx: int) -> None:
+        self._freeze_embedding_training_state()
 
     def validation_step(self, batch: Tensor, batch_idx: int) -> Tensor:
         x, y = batch
@@ -336,6 +371,7 @@ class LightningModel(pl.LightningModule):
             logger=self.train_params["logger"] is not None,
             on_step=False,
             on_epoch=True,
+            sync_dist=True,
         )
         self.update_metrics(self.val_metrics, y_hat, y)
         self.val_losses.append(loss)
@@ -356,8 +392,8 @@ class LightningModel(pl.LightningModule):
             print(mean_val_metrics)
             print(f"validation loss: {mean_losses}")
         else:
-            self.log_dict(mean_val_metrics)
-            self.log("val_loss", mean_losses)
+            self.log_dict(mean_val_metrics, sync_dist=True)
+            self.log("val_loss", mean_losses, sync_dist=True)
 
         self.val_metrics.reset()
         self.val_losses = []
@@ -373,7 +409,14 @@ class LightningModel(pl.LightningModule):
         logits = self.forward(x, logits=True)
         loss = self.loss(logits, y)
         y_hat = self.activation(logits)
-        self.log("test_loss", loss, logger=True, on_step=False, on_epoch=True)
+        self.log(
+            "test_loss",
+            loss,
+            logger=True,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
         self.update_metrics(self.test_metrics, y_hat, y)
         self.test_losses.append(loss)
         return loss
@@ -383,9 +426,9 @@ class LightningModel(pl.LightningModule):
         Calculate metrics for entire test set
         """
         test_metrics = self.test_metrics.compute()
-        self.log_dict({k: v.mean() for k, v in test_metrics.items()})
+        self.log_dict({k: v.mean() for k, v in test_metrics.items()}, sync_dist=True)
         losses = torch.stack(self.test_losses)
-        self.log("test_loss", torch.mean(losses))
+        self.log("test_loss", torch.mean(losses), sync_dist=True)
 
         self.test_metrics.reset()
         self.test_losses = []
@@ -642,6 +685,7 @@ class LightningModel(pl.LightningModule):
             default_root_dir=self.train_params["save_dir"],
             gradient_clip_val=self.train_params["clip"],
             accumulate_grad_batches=self.train_params["accumulate_grad_batches"],
+            precision=self.train_params.get("precision", None),
         )
 
         # Make dataloaders
@@ -833,6 +877,41 @@ class LightningModel(pl.LightningModule):
 
         # Predict
         preds = torch.concat(trainer.predict(self, dataloader))
+        if trainer.world_size > 1 and torch.distributed.is_initialized():
+            rank = trainer.local_rank
+            world = trainer.world_size
+            device = torch.device(f"cuda:{rank}")
+
+            # Each rank may have a different number of predictions.
+            # Exchange counts first so we can pad to uniform all_gather buffer sizes.
+            local_size = torch.tensor([preds.shape[0]], device=device)
+            all_sizes = [torch.zeros_like(local_size) for _ in range(world)]
+            torch.distributed.all_gather(all_sizes, local_size)
+            max_sz = max(int(s.item()) for s in all_sizes)
+
+            preds = preds.to(device)
+            if preds.shape[0] < max_sz:
+                pad = torch.zeros(
+                    max_sz - preds.shape[0], *preds.shape[1:],
+                    dtype=preds.dtype, device=device,
+                )
+                preds = torch.cat([preds, pad], dim=0)
+
+            preds = preds.contiguous()
+            gathered_preds = [torch.zeros_like(preds) for _ in range(world)]
+            torch.distributed.all_gather(gathered_preds, preds)
+
+            # DistributedSampler (shuffle=False) is stride-based:
+            #   rank r gets indices [r, r+W, r+2W, ...]
+            # stack + view interleaves ranks to restore original order.
+            preds = torch.stack(gathered_preds, dim=1).view(-1, *preds.shape[1:]).cpu()
+
+            # Discard padding added for uniformity
+            total_real = sum(int(s.item()) for s in all_sizes)
+            preds = preds[:total_real]
+        n_group = dataset.n_augmented * getattr(dataset, "n_alleles", 1)
+        limit = (len(preds) // n_group) * n_group
+        preds = preds[: min(len(dataset), limit)]
 
         if isinstance(dataset, (SeqDataset, LabeledSeqDataset)):
 

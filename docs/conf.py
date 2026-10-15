@@ -272,7 +272,7 @@ html_use_smartypants = True
 # html_file_suffix = None
 
 # Output file base name for HTML help builder.
-htmlhelp_basename = "grelu-doc"
+htmlhelp_basename = "grelu-agent-doc"
 
 
 # -- Options for LaTeX output ------------------------------------------------
