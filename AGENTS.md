@@ -8,6 +8,9 @@ Checkout:
 /work2/Users/qijun/gReLU-clustering
 ```
 
+`/home/fqijun/python/gReLU-clustering` is a symlink to it on bagpipe and
+bandoneon. Keep the checkout on `/work2`: `/home` is local to each host.
+
 This repository starts a new phase from the saturation ISM infrastructure of
 `gReLU-replication`. It was cloned from that repository's `alphagenome` branch
 (commit `8409dfe`) on 2026-10-15 and trimmed to the ISM core; Git history is
