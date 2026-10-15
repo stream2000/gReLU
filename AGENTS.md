@@ -11,7 +11,9 @@ Checkout:
 This repository starts a new phase from the saturation ISM infrastructure of
 `gReLU-replication`. It was cloned from that repository's `alphagenome` branch
 (commit `8409dfe`) on 2026-10-15 and trimmed to the ISM core; Git history is
-kept.
+kept. The mainline is branch `dev` on `origin`
+(`git@github.com:stream2000/gReLU.git`); the remote `replication` points to the
+old local checkout.
 
 ## Start here
 
